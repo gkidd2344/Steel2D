@@ -617,8 +617,9 @@ class GameScreen(tk.Frame):
                 menu.add_command(label="Delete Tile",
                                  command=lambda: self._send(
                                      {"type": "DM_TILE_SET", "cell": [gx, gy], "walkable": False}))
-            menu.add_command(label="Warp Players Here",
-                             command=lambda: self._dm_warp(gx, gy))
+            if grid_cell.occupant is None:
+                menu.add_command(label="Warp Players Here",
+                                command=lambda: self._dm_warp(gx, gy))
 
         menu.tk_popup(sx, sy)
 
