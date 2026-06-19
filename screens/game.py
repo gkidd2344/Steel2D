@@ -574,21 +574,17 @@ class GameScreen(tk.Frame):
                              command=lambda: self._send(
                                  {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
             if isinstance(obj, NPC):
-                if self.state.combat:
-                    if obj.id in self.state.combat.encounter_npc_ids:
-                        menu.add_command(
-                            label="Remove From Encounter",
-                            command=lambda: self._send(
-                                {"type": "DM_REMOVE_FROM_ENCOUNTER", "npc_id": obj.id}))
-                    else:
-                        menu.add_command(
-                            label="Add To Encounter",
-                            command=lambda: self._send(
-                                {"type": "DM_ADD_TO_ENCOUNTER", "npc_id": obj.id}))
+                if obj.id in self.state.combat.encounter_npc_ids:
+                    menu.add_command(
+                        label="Remove From Encounter",
+                        command=lambda: self._send(
+                            {"type": "DM_REMOVE_FROM_ENCOUNTER", "npc_id": obj.id}))
+                else:
+                    menu.add_command(
+                        label="Add To Encounter",
+                        command=lambda: self._send(
+                            {"type": "DM_ADD_TO_ENCOUNTER", "npc_id": obj.id}))
                 npc_action_menu = tk.Menu(menu, tearoff=0, bg=PALETTE["card"], fg=PALETTE["fg"])
-                npc_action_menu.add_command(
-                    label="Default Attack",
-                    command=lambda: self._dm_npc_target_select(obj, "Default Attack"))
                 if obj.Actions:
                     for aname in obj.Actions:
                         npc_action_menu.add_command(
