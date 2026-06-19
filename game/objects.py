@@ -209,6 +209,34 @@ class Wall:
         return cls(id=d["id"], type=d.get("type", "Wall"))
 
 
+@dataclass
+class Stairs:
+    id: str
+    type: str = "Stairs"
+    Name: str = "Stairs"
+    Direction: str = "Up"       # "Up" | "Down"
+    LinkedStair: str = ""       # UUID of linked Stairs, or ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "Name": self.Name,
+            "Direction": self.Direction,
+            "LinkedStair": self.LinkedStair,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Stairs":
+        return cls(
+            id=d["id"],
+            type=d.get("type", "Stairs"),
+            Name=d.get("Name", "Stairs"),
+            Direction=d.get("Direction", "Up"),
+            LinkedStair=d.get("LinkedStair", ""),
+        )
+
+
 def occupant_from_dict(d: Optional[dict]):
     if not d:
         return None
@@ -221,4 +249,6 @@ def occupant_from_dict(d: Optional[dict]):
         return Door.from_dict(d)
     if t == "Wall":
         return Wall.from_dict(d)
+    if t == "Stairs":
+        return Stairs.from_dict(d)
     return None

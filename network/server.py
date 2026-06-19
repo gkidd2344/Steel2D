@@ -16,7 +16,7 @@ from typing import Optional, Dict, Tuple, List
 
 from network.protocol import encode_msg
 from game.state import GameState, CombatState, make_initial_state
-from game.objects import NPC, Item, Door, PlayerObject, occupant_from_dict
+from game.objects import NPC, Item, Door, Wall, Stairs, PlayerObject, occupant_from_dict
 from game.stats import clamp_stats, calc_max_hp, apply_action, effective_stat
 from game.combat import build_turn_queue, advance_turn, remove_combatant, roll_initiative
 from app.config import STAT_KEYS, load_game_config, get_base_dir
@@ -281,6 +281,7 @@ class GameServer:
             "DM_NPC_END_TURN": self._h_dm_npc_end_turn,
             "DM_CHAT_AS_NPC": self._h_dm_chat_as_npc,
             "DM_LONG_REST": self._h_dm_long_rest,
+            "PLAYER_TAKE_STAIRS": self._h_player_take_stairs,
         }
         h = handlers.get(t)
         if h:
@@ -312,7 +313,7 @@ class GameServer:
         target = self.state.grid.get((tx, ty))
         if not target or not target.walkable:
             return
-        if target.occupant and not isinstance(target.occupant, (Item,)):
+        if target.occupant and not isinstance(target.occupant, (Item, Stairs)):
             if isinstance(target.occupant, Door) and not target.occupant.Open:
                 return
             if isinstance(target.occupant, NPC):
@@ -1273,6 +1274,46 @@ class GameServer:
         else:
             self.state.chat_history.append(chat_msg)
             await self._broadcast({"type": "CHAT_RECV", "message": chat_msg})
+
+    async def _h_player_take_stairs(self, conn: ClientConn, msg: dict) -> None:
+        pid = conn.uuid
+        stair_id = msg.get("stair_id", "")
+        # Validate player is on a cell with this stair
+        player_cell = self._find_player_cell(pid)
+        if not player_cell:
+            return
+        grid_cell = self.state.grid.get(player_cell)
+        if not grid_cell or not isinstance(grid_cell.occupant, Stairs):
+            return
+        if grid_cell.occupant.id != stair_id:
+            return
+        linked_id = grid_cell.occupant.LinkedStair
+        if not linked_id:
+            return
+        dest_cell = self.state.find_object_cell(linked_id)
+        if not dest_cell:
+            return
+        lx, ly = dest_cell
+        # Move player
+        old_key = f"{player_cell[0]},{player_cell[1]}"
+        new_key = f"{lx},{ly}"
+        lst = self.state.players_at.get(old_key, [])
+        if pid in lst:
+            lst.remove(pid)
+        self.state.players_at.setdefault(new_key, [])
+        if pid not in self.state.players_at[new_key]:
+            self.state.players_at[new_key].append(pid)
+        self._player_cells[pid] = (lx, ly)
+        patches = [
+            {"op": "set_players_at", "path": old_key,
+             "value": self.state.players_at.get(old_key, [])},
+            {"op": "set_players_at", "path": new_key,
+             "value": self.state.players_at[new_key]},
+        ]
+        await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+        pc = self.clients.get(pid)
+        if pc:
+            await pc.send({"type": "CAMERA_CENTER", "cell": [lx, ly]})
 
     async def _h_dm_long_rest(self, conn: ClientConn, msg: dict) -> None:
         if not conn.is_host:

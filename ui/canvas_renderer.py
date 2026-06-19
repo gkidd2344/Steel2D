@@ -12,7 +12,7 @@ except ImportError:
     HAS_PIL = False
 
 from app.constants import BASE_CELL_PX, ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, PALETTE
-from game.objects import NPC, Item, Door, Wall, PlayerObject
+from game.objects import NPC, Item, Door, Wall, Stairs, PlayerObject
 from game.state import GameState
 from game.los import has_los, cells_in_range
 
@@ -58,6 +58,28 @@ class GameCanvas(tk.Canvas):
         self._hover_cell: Optional[Tuple[int, int]] = None
         self._img_cache: Dict[Tuple, object] = {}
         self._anim_frame = 0
+
+        # ── Water depth colours (precomputed from base) ───────────────────────
+        # Four variants: depth 0 (shallow) → 3 (deep).
+        # Each deeper level: brightness −12.5 %, saturation +12.5 %.
+        import colorsys as _cs
+        _b = "#a8d8ea"
+        _rv = int(_b[1:3], 16) / 255
+        _gv = int(_b[3:5], 16) / 255
+        _bv = int(_b[5:7], 16) / 255
+        _h, _s, _v = _cs.rgb_to_hsv(_rv, _gv, _bv)
+        self._WATER_COLORS: list = []
+        for _depth in range(4):
+            _as = min(1.0, _s + _depth * 0.125)
+            _av = max(0.0, _v - _depth * 0.125)
+            _r2, _g2, _b2 = _cs.hsv_to_rgb(_h, _as, _av)
+            self._WATER_COLORS.append(
+                "#{:02x}{:02x}{:02x}".format(
+                    int(_r2 * 255), int(_g2 * 255), int(_b2 * 255)))
+
+        # Water depth cache — invalidated whenever cells change
+        self._water_depth_cache: Dict[Tuple[int, int], int] = {}
+        self._water_cache_key: int = 0   # id() of grid dict as proxy for change
 
         # Single binding per button — <Button-1> and <ButtonPress-1> are
         # the same Tk event; binding both overwrites the first.
@@ -180,14 +202,17 @@ class GameCanvas(tk.Canvas):
             self.create_line(0, y, w, y, fill=color, width=1)
             y += cell_px
 
-    _TILE_COLORS = {
-        "ground": "#ffffff",
-        "water":  "#a8d8ea",   # light pastel blue
-    }
+    _GROUND_COLOR = "#ffffff"
 
     def _draw_tiles(self, min_cx, max_cx, min_cy, max_cy, cell_px) -> None:
         pad = 2 * self.zoom
         grid = self.state.grid
+
+        # Invalidate water depth cache when the grid changes
+        grid_key = id(grid) ^ len(grid)
+        if grid_key != self._water_cache_key:
+            self._water_cache_key = grid_key
+            self._water_depth_cache = {}
 
         def _water_neighbor(nx, ny) -> bool:
             c = grid.get((nx, ny))
@@ -197,22 +222,51 @@ class GameCanvas(tk.Canvas):
             if not (min_cx <= gx <= max_cx and min_cy <= gy <= max_cy):
                 continue
             tile_type = cell.tile_type
-            color = self._TILE_COLORS.get(tile_type)
-            if color is None:
-                continue
-            x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
-
-            if tile_type == "water":
-                # Extend toward adjacent water tiles to close the inter-cell gap
+            if tile_type == "ground":
+                x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
+                self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+                                      fill=self._GROUND_COLOR, outline="", tags="tile")
+            elif tile_type == "water":
+                x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
+                # Extend toward adjacent water to close inter-cell gaps
                 ax0 = x0 if _water_neighbor(gx - 1, gy) else x0 + pad
                 ay0 = y0 if _water_neighbor(gx, gy - 1) else y0 + pad
                 ax1 = x1 if _water_neighbor(gx + 1, gy) else x1 - pad
                 ay1 = y1 if _water_neighbor(gx, gy + 1) else y1 - pad
+                # Depth-based colour
+                depth = self._water_depth_cache.get((gx, gy))
+                if depth is None:
+                    depth = self._compute_water_depth(gx, gy)
+                    self._water_depth_cache[(gx, gy)] = depth
+                color = self._WATER_COLORS[depth]
                 self.create_rectangle(ax0, ay0, ax1, ay1,
                                       fill=color, outline="", tags="tile")
-            else:
-                self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
-                                      fill=color, outline="", tags="tile")
+
+    def _compute_water_depth(self, gx: int, gy: int) -> int:
+        """Return depth 0-3 based on distance to nearest ground tile (Chebyshev)."""
+        grid = self.state.grid
+        min_dist = 5   # sentinel — no ground found within search radius
+        for dx in range(-4, 5):
+            for dy in range(-4, 5):
+                d = max(abs(dx), abs(dy))   # Chebyshev distance
+                if d >= min_dist:
+                    continue
+                c = grid.get((gx + dx, gy + dy))
+                if c and c.tile_type == "ground":
+                    min_dist = d
+                    if min_dist <= 2:
+                        break           # can't get better than ≤ 2
+            if min_dist <= 2:
+                break
+        # Map distance → depth level
+        if min_dist <= 2:
+            return 0
+        elif min_dist == 3:
+            return 1
+        elif min_dist == 4:
+            return 2
+        else:
+            return 3
 
     def _draw_combat_highlights(self, cell_px: float) -> None:
         if not (self.state.combat and self.state.combat.active):
@@ -273,6 +327,8 @@ class GameCanvas(tk.Canvas):
                 self._draw_door(obj, x0, y0, x1, y1, cx, cy)
             elif isinstance(obj, Wall):
                 self._draw_wall(gx, gy, x0, y0, x1, y1)
+            elif isinstance(obj, Stairs):
+                self._draw_stairs(obj, x0, y0, x1, y1, cx, cy)
 
     def _draw_npc(self, npc: NPC, x0, y0, x1, y1, cx, cy, pad) -> None:
         size = min(x1 - x0, y1 - y0) * 0.595
@@ -338,6 +394,20 @@ class GameCanvas(tk.Canvas):
             s = min(x1 - x0, y1 - y0) * 0.2
             self.create_oval(cx - s, cy - s, cx + s, cy + s,
                              fill="#ffcc00", outline="#cc9900", width=1)
+
+    def _draw_stairs(self, stairs: Stairs,
+                    x0: float, y0: float, x1: float, y1: float,
+                    cx: float, cy: float) -> None:
+        UP_COLOR   = "#3388bb"   # blue for going up
+        DOWN_COLOR = "#883388"   # purple for going down
+        pad = 4 * self.zoom
+        color = UP_COLOR if stairs.Direction == "Up" else DOWN_COLOR
+        arrow = "▲" if stairs.Direction == "Up" else "▼"
+        self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+                              fill=color, outline="#ffffff", width=1, tags="stairs")
+        font_size = max(8, int((x1 - x0 - pad * 2) * 0.45))
+        self.create_text(cx, cy, text=arrow, fill="#ffffff",
+                         font=("Segoe UI", font_size, "bold"), tags="stairs")
 
     def _draw_wall(self, gx: int, gy: int,
                    x0: float, y0: float, x1: float, y1: float) -> None:
@@ -512,6 +582,16 @@ class GameCanvas(tk.Canvas):
                         lines.append("Locked")
                     if obj.Broken:
                         lines.append("Broken")
+            elif isinstance(obj, Stairs):
+                if can_see:
+                    if self.is_dm:
+                        lines.append(f"Stairs: {obj.Name}")
+                        lines.append(f"Direction: {obj.Direction}")
+                        if obj.LinkedStair:
+                            linked_cell = self.state.find_object_cell(obj.LinkedStair)
+                            lines.append(f"Linked: {linked_cell}")
+                    else:
+                        lines.append(f"Stairs {obj.Direction}")
 
         # Append coordinates for all non-NPC tooltips (NPC format includes it inline)
         if not lines:
@@ -637,7 +717,13 @@ class GameCanvas(tk.Canvas):
             pc = self._player_cell()
             if pc:
                 px, py = pc
-                if abs(gx - px) <= 1 and abs(gy - py) <= 1 and (gx, gy) != pc:
+                if (gx, gy) == (px, py):
+                    # Clicking own cell — trigger Ground interaction for Stairs / Items
+                    gc = self.state.grid.get((gx, gy))
+                    if gc and isinstance(gc.occupant, (Stairs, Item)):
+                        self.open_context("own_cell_interact", (gx, gy))
+                        return
+                elif abs(gx - px) <= 1 and abs(gy - py) <= 1:
                     cell = self.state.grid.get((gx, gy))
                     if cell:
                         uuids = self.state.players_at.get(f"{gx},{gy}", [])
@@ -782,6 +868,11 @@ class GameCanvas(tk.Canvas):
         self.offset_y = wy - my / new_zoom
 
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    def invalidate_water_depth(self) -> None:
+        """Force-clear the water depth cache (called after cell patches)."""
+        self._water_depth_cache = {}
+        self._water_cache_key = 0
 
     def center_on_origin_grid(self) -> None:
         """Centre the viewport on the middle of the initial 4×4 grid block."""

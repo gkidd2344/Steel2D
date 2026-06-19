@@ -214,8 +214,32 @@ class GameScreen(tk.Frame):
 
     def _dispatch(self, event_type: str, payload: dict) -> None:
         if event_type == "STATE_PATCH":
-            self._apply_patches(payload.get("patches", []))
+            prev_cell = self.state.find_player_cell(self.local_uuid)
+            patches = payload.get("patches", [])
+            self._apply_patches(patches)
             self._refresh_combat_ui()
+
+            # Invalidate water depth cache whenever cells change
+            if any(p.get("op") in ("set_cell", "del_cell") for p in patches):
+                self._canvas.invalidate_water_depth()
+
+            if not self.is_dm:
+                new_cell = self.state.find_player_cell(self.local_uuid)
+                if new_cell and new_cell != prev_cell:
+                    # ── Stair landing prompt ──────────────────────────────────
+                    from game.objects import Stairs as _S
+                    gc = self.state.grid.get(new_cell)
+                    if gc and isinstance(gc.occupant, _S):
+                        stair = gc.occupant
+                        self.after(60, lambda s=stair, c=new_cell:
+                                   self._show_stair_prompt(s, c))
+
+                    # ── Camera follow on teleport (distance > 1 cell) ─────────
+                    if prev_cell:
+                        dist = max(abs(new_cell[0] - prev_cell[0]),
+                                   abs(new_cell[1] - prev_cell[1]))
+                        if dist > 1:
+                            self._canvas.center_on_cell(new_cell[0], new_cell[1])
         elif event_type == "CHAT_RECV":
             msg = payload.get("message", payload)
             self._chat.add_message(msg)
@@ -472,6 +496,16 @@ class GameScreen(tk.Frame):
             self._confirm_combat_action(gx, gy)
             return
 
+        if context == "own_cell_interact" and not self.is_dm:
+            if grid_cell and grid_cell.occupant:
+                from game.objects import Stairs as _S, Item as _I
+                obj = grid_cell.occupant
+                if isinstance(obj, _S):
+                    self._show_stair_prompt(obj, (gx, gy))
+                elif isinstance(obj, _I):
+                    self._pc_item_ground_menu(gx, gy, obj)
+            return
+
         if context == "left_interact" and not self.is_dm:
             self._pc_left_interact(gx, gy, grid_cell)
             return
@@ -599,6 +633,19 @@ class GameScreen(tk.Frame):
         })
         self._canvas.set_combat_action(None, set())
 
+    def _pc_item_ground_menu(self, gx: int, gy: int, item: Item) -> None:
+        """Pick-up/inspect menu shown when PC is standing on an Item tile."""
+        menu = tk.Menu(self.winfo_toplevel(), tearoff=0,
+                       bg=PALETTE["card"], fg=PALETTE["fg"])
+        menu.add_command(
+            label="Pick Up",
+            command=lambda: self._send({"type": "ITEM_PICKUP",
+                                        "cell": [gx, gy], "item_id": item.id}))
+        menu.add_command(label="Inspect", command=lambda: self._inspect(item))
+        x = self.winfo_rootx() + self._canvas.winfo_width() // 2
+        y = self.winfo_rooty() + self._canvas.winfo_height() // 2
+        menu.tk_popup(x, y)
+
     def _pc_do_action(self, npc: NPC, gx, gy, item, action_name) -> None:
         self._send({
             "type": "PLAYER_ACTION",
@@ -611,6 +658,26 @@ class GameScreen(tk.Frame):
     def _inspect(self, obj) -> None:
         from dialogs.object_tooltip import ObjectTooltip
         ObjectTooltip(self.winfo_toplevel(), obj)
+
+    def _show_stair_prompt(self, stair, cell) -> None:
+        from dialogs.stair_dialog import StairPromptDialog
+
+        def _yes():
+            if stair.LinkedStair:
+                self._send({"type": "PLAYER_TAKE_STAIRS", "stair_id": stair.id})
+
+        StairPromptDialog(self._canvas, stair, on_yes=_yes, on_no=lambda: None)
+
+    def _dm_modify_stairs(self, stair, cell) -> None:
+        from dialogs.stair_dialog import StairModifyDialog
+        StairModifyDialog(
+            self.winfo_toplevel(), stair, cell, self.state,
+            on_save=lambda obj_d: self._send({
+                "type": "DM_MODIFY_OBJECT",
+                "cell": list(cell),
+                "object": obj_d,
+            }),
+        )
 
     def _dm_right_click(self, gx, gy, grid_cell, screen_pos) -> None:
         sx, sy = screen_pos if screen_pos else (100, 100)
@@ -676,8 +743,16 @@ class GameScreen(tk.Frame):
         is_protected = bool(grid_cell.protected)
 
         if obj:
-            from game.objects import Wall as _Wall, Door as _Door
-            if isinstance(obj, _Wall):
+            from game.objects import Wall as _Wall, Door as _Door, Stairs as _Stairs
+            if isinstance(obj, _Stairs):
+                menu.add_command(label="Modify Stairs",
+                                 command=lambda s=obj, c=(gx, gy):
+                                     self._dm_modify_stairs(s, c))
+                if not is_protected:
+                    menu.add_command(label="Delete Stairs",
+                                     command=lambda: self._send(
+                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+            elif isinstance(obj, _Wall):
                 if not is_protected:
                     menu.add_command(label="Delete Wall",
                                      command=lambda: self._send(
@@ -744,6 +819,14 @@ class GameScreen(tk.Frame):
                     "type": "DM_SPAWN_OBJECT", "cell": [gx, gy],
                     "object": {"type": "Door", "id": str(_uuid_mod.uuid4()),
                                "Open": False, "Broken": False, "Locked": False}
+                })
+            )
+            menu.add_command(
+                label="Spawn Stairs",
+                command=lambda: self._send({
+                    "type": "DM_SPAWN_OBJECT", "cell": [gx, gy],
+                    "object": {"type": "Stairs", "id": str(_uuid_mod.uuid4()),
+                               "Name": "Stairs", "Direction": "Up", "LinkedStair": ""}
                 })
             )
 
