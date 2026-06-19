@@ -351,7 +351,7 @@ class SpawnObjectDialog(Panel):
             row=row, column=0, sticky="e", pady=3, padx=4)
         tk.Checkbutton(
             f, variable=self._item_consumable,
-            bg=PALETTE["card"], selectcolor=PALETTE["accent"],
+            bg=PALETTE["card"], selectcolor=PALETTE["accent"], fg=PALETTE["fg"], 
             activebackground=PALETTE["card"]).grid(row=row, column=1, sticky="w")
         row += 1
 
@@ -463,7 +463,7 @@ class SpawnObjectDialog(Panel):
                      font=FONTS["body"], width=12, anchor="e").pack(
                 side=tk.LEFT, padx=4)
             tk.Checkbutton(r, variable=var, bg=PALETTE["card"],
-                           selectcolor=PALETTE["accent"],
+                           selectcolor=PALETTE["accent"], fg=PALETTE["fg"], 
                            activebackground=PALETTE["card"]).pack(side=tk.LEFT)
 
     # ── Action row ────────────────────────────────────────────────────────────
