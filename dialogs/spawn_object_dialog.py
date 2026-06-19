@@ -16,12 +16,14 @@ if TYPE_CHECKING:
 class SpawnObjectDialog(Panel):
     def __init__(self, parent, on_spawn: Callable,
                  settings: Optional["GameSettings"] = None,
-                 existing=None, title: str = "Spawn Object"):
+                 existing=None, title: str = "Spawn Object",
+                 prefabs: Optional[list] = None):
         super().__init__(parent, padx=0, pady=0)
         self._wm_title = title
         self._on_spawn = on_spawn
         self._settings = settings
         self._existing = existing
+        self._prefabs: list = prefabs or []
         self._type_var = tk.StringVar(value="NPC")
         self._err_var = tk.StringVar()
         self._action_rows: list = []
@@ -191,7 +193,7 @@ class SpawnObjectDialog(Panel):
         self._npc_stat_warn = tk.StringVar()
 
         # ── General ──────────────────────────────────────────────────────────
-        _, gen = self._make_section(self._body_frame, "General", expanded=False)
+        _, gen = self._make_section(self._body_frame, "General", expanded=True)
 
         self._field_row(gen, "Name *",
                         lambda p: styled_entry(p, textvariable=self._npc_name,
@@ -258,11 +260,11 @@ class SpawnObjectDialog(Panel):
                  wraplength=380, justify="left").pack(anchor="w", padx=4, pady=(0, 4))
 
         # ── Actions ───────────────────────────────────────────────────────────
+        self._action_show_scales_with = True   # NPC actions carry ScalesWith
         _, act_sec = self._make_section(self._body_frame, "Actions", expanded=False)
         self._action_frame = tk.Frame(act_sec, bg=PALETTE["card"])
         self._action_frame.pack(fill=tk.X)
-        flat_btn(act_sec, "+ Add Action", self._add_action_row,
-                 style="ghost").pack(anchor="w", pady=(6, 0))
+        self._build_action_buttons(act_sec)
 
         if not self._existing:
             self._add_action_row(preset={
@@ -319,7 +321,7 @@ class SpawnObjectDialog(Panel):
         self._item_slot = tk.StringVar(value="(none)")
 
         # ── General ──────────────────────────────────────────────────────────
-        _, gen = self._make_section(self._body_frame, "General", expanded=False)
+        _, gen = self._make_section(self._body_frame, "General", expanded=True)
 
         self._field_row(gen, "Name *",
                         lambda p: styled_entry(p, textvariable=self._item_name,
@@ -385,11 +387,11 @@ class SpawnObjectDialog(Panel):
                  wraplength=380, justify="left").pack(anchor="w", padx=4, pady=(0, 4))
 
         # ── Actions ───────────────────────────────────────────────────────────
+        self._action_show_scales_with = False  # Item scalars live at item level
         _, act_sec = self._make_section(self._body_frame, "Actions", expanded=False)
         self._action_frame = tk.Frame(act_sec, bg=PALETTE["card"])
         self._action_frame.pack(fill=tk.X)
-        flat_btn(act_sec, "+ Add Action", self._add_action_row,
-                 style="ghost").pack(anchor="w", pady=(6, 0))
+        self._build_action_buttons(act_sec)
 
     def _validate_item_stats(self) -> None:
         if not hasattr(self, "_item_stat_warn") or not self._item_stat_warn:
@@ -410,6 +412,43 @@ class SpawnObjectDialog(Panel):
         except Exception:
             pass
 
+    # ── Action section buttons ────────────────────────────────────────────────
+
+    def _build_action_buttons(self, parent: tk.Frame) -> None:
+        btn_row = tk.Frame(parent, bg=PALETTE["card"])
+        btn_row.pack(anchor="w", pady=(6, 0))
+        flat_btn(btn_row, "+  New Action", self._add_action_row,
+                 style="ghost").pack(side=tk.LEFT, padx=(0, 6))
+        flat_btn(btn_row, "+  Prefab Action", self._pick_prefab_action,
+                 style="muted").pack(side=tk.LEFT)
+
+    def _pick_prefab_action(self) -> None:
+        action_prefabs = [p for p in self._prefabs if p.get("type") == "Action"]
+        if not action_prefabs:
+            from tkinter import messagebox
+            messagebox.showinfo("No Action Prefabs",
+                                "No Action-type prefabs are loaded.")
+            return
+
+        def _on_select(action_dict: dict) -> None:
+            self._add_action_row(preset={
+                "name":       action_dict.get("Name", ""),
+                "desc":       action_dict.get("Description", ""),
+                "range":      action_dict.get("Range", 1),
+                "damage":     action_dict.get("BaseDamage", 0),
+                "hits":       action_dict.get("Hits", 1),
+                "casts":      action_dict.get("Casts"),
+                "gives_buff": {
+                    "BuffName":     action_dict.get("BuffName", ""),
+                    "BuffValue":    action_dict.get("BuffValue", 1),
+                    "BuffDuration": action_dict.get("BuffDuration", 5),
+                } if action_dict.get("GivesBuff") else {},
+                "ScalesWith": action_dict.get("ScalesWith", {}),
+            })
+
+        from dialogs.spawn_prefab_dialog import SpawnPrefabDialog
+        SpawnPrefabDialog(self, prefabs=action_prefabs, on_spawn=_on_select)
+
     # ── Action row ────────────────────────────────────────────────────────────
 
     def _add_action_row(self, preset: dict = None) -> None:
@@ -417,9 +456,10 @@ class SpawnObjectDialog(Panel):
             return
         preset = preset or {}
         pb = preset.get("gives_buff") or {}
+        sw_preset = preset.get("ScalesWith") or {}
         row_data = {
             "name":          tk.StringVar(value=preset.get("name", "")),
-            "desc_widget":   None,          # set below
+            "desc_widget":   None,
             "desc_init":     preset.get("desc", ""),
             "range":         tk.IntVar(value=preset.get("range", 1)),
             "damage":        tk.IntVar(value=preset.get("damage", 0)),
@@ -431,6 +471,10 @@ class SpawnObjectDialog(Panel):
             "buff_name":     tk.StringVar(value=pb.get("BuffName", "")),
             "buff_value":    tk.IntVar(value=pb.get("BuffValue", 1)),
             "buff_duration": tk.IntVar(value=pb.get("BuffDuration", 5)),
+            # ScalesWith — per-stat damage scaling (NPC actions and Action prefabs only)
+            "has_scales":    tk.BooleanVar(value=bool(sw_preset)),
+            "scales_with":   {k: tk.StringVar(value=sw_preset.get(k, ""))
+                              for k in STAT_KEYS},
         }
         self._action_rows.append(row_data)
 
@@ -563,6 +607,37 @@ class SpawnObjectDialog(Panel):
         if row_data["gives_buff"].get():
             buff_sub.pack(fill=tk.X, pady=(2, 0))
 
+        # ── ScalesWith — shown for NPC actions and standalone Action prefabs ──
+        if getattr(self, "_action_show_scales_with", False):
+            sw_outer = tk.Frame(outer, bg=PALETTE["card2"])
+            sw_outer.pack(fill=tk.X, pady=(2, 0))
+            sw_chk_row = tk.Frame(sw_outer, bg=PALETTE["card2"])
+            sw_chk_row.pack(fill=tk.X)
+            sw_sub = tk.Frame(sw_outer, bg=PALETTE["card2"])
+
+            def _toggle_sw():
+                if row_data["has_scales"].get():
+                    sw_sub.pack(fill=tk.X, pady=(2, 0))
+                else:
+                    sw_sub.pack_forget()
+                self.after_idle(self._update_scroll)
+
+            styled_check(sw_chk_row, "Scales With Stat",
+                         row_data["has_scales"], command=_toggle_sw,
+                         bg=PALETTE["card2"]).pack(side=tk.LEFT, padx=4)
+
+            for k in STAT_KEYS:
+                col_f = tk.Frame(sw_sub, bg=PALETTE["card2"])
+                col_f.pack(side=tk.LEFT, padx=(4, 2))
+                tk.Label(col_f, text=k, bg=PALETTE["card2"],
+                         fg="#ffffff", font=FONTS["small"]).pack(side=tk.LEFT)
+                ttk.Combobox(col_f, textvariable=row_data["scales_with"][k],
+                             values=[""] + list(SCALAR_WEIGHT_LOOKUP.keys()),
+                             state="readonly", width=4).pack(side=tk.LEFT, padx=1)
+
+            if row_data["has_scales"].get():
+                sw_sub.pack(fill=tk.X, pady=(2, 0))
+
         self._update_scroll()
 
     # ── pre-fill ──────────────────────────────────────────────────────────────
@@ -654,6 +729,11 @@ class SpawnObjectDialog(Panel):
                 action["BuffName"]     = row["buff_name"].get().strip()
                 action["BuffValue"]    = row["buff_value"].get()
                 action["BuffDuration"] = row["buff_duration"].get()
+            if row.get("has_scales") and row["has_scales"].get():
+                sw = {k: v.get() for k, v in row.get("scales_with", {}).items()
+                      if v.get()}
+                if sw:
+                    action["ScalesWith"] = sw
             result[name] = action
         return result or None
 

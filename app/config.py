@@ -46,6 +46,12 @@ def get_saves_dir() -> Path:
     return d
 
 
+def get_prefabs_dir() -> Path:
+    d = get_base_dir() / "prefabs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def load_user_config() -> dict:
     path = get_base_dir() / "user.config"
     if path.exists():

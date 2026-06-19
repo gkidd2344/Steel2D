@@ -13,6 +13,7 @@ def flat_btn(parent, text: str, command=None, style: str = "normal",
         "ghost":   (PALETTE["card2"],   PALETTE["fg"]),
         "rest":    (PALETTE["rest"],    PALETTE["fg"]),
         "fight":   (PALETTE["fight"],   PALETTE["fg"]),
+        "spectre": ("#221840",          "#c4a0f0"),   # dark violet / lavender
     }
     bg, fg = colours.get(style, colours["normal"])
     opts = dict(

@@ -119,24 +119,60 @@ class GameServer:
             await self._server.serve_forever()
 
     async def _buff_tick_loop(self) -> None:
-        """Decrement buff durations every 60 s while out of combat."""
+        """
+        Every 60 s while out of combat:
+          1. Apply HP Over Time buffs individually (heals then damage) for every
+             player and NPC that carries active buffs.
+          2. Tick buff durations by 1 minute; remove expired ones.
+          3. Broadcast a single STATE_PATCH covering all changed entities.
+        In-combat ticks are handled per-turn by _process_turn_end_buffs.
+        """
         while True:
             await asyncio.sleep(60)
             try:
                 if self.state.combat and self.state.combat.active:
-                    continue  # in combat: durations tick on turn-end instead
+                    continue
+
                 patches = []
+
+                # ── Players ───────────────────────────────────────────────────
                 for pid, player in list(self.state.players.items()):
-                    if not player.Buffs:
+                    buffs = getattr(player, "Buffs", [])
+                    if not isinstance(buffs, list) or not buffs:
                         continue
-                    expired = [k for k, b in list(player.Buffs.items())
-                                if b.get("Duration", 0) - 1.0 <= 0]
-                    for b in player.Buffs.values():
+                    await self._apply_hot_buffs(player, player.Name or "Player")
+                    for b in buffs:
                         b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
-                    for k in expired:
-                        del player.Buffs[k]
+                    player.Buffs[:] = [b for b in buffs if b.get("Duration", 0) > 0]
                     patches.append({"op": "set_player", "path": pid,
                                     "value": player.to_dict()})
+
+                # ── NPCs in the grid ──────────────────────────────────────────
+                for (cx, cy), cell in list(self.state.grid.items()):
+                    occ = cell.occupant
+                    if not isinstance(occ, NPC):
+                        continue
+                    buffs = getattr(occ, "Buffs", [])
+                    if not isinstance(buffs, list) or not buffs:
+                        continue
+                    await self._apply_hot_buffs(occ, occ.Name or "NPC")
+                    # Handle NPC death from DoT outside combat
+                    if occ.CurrentHP <= 0:
+                        cell.occupant = None
+                        if self.state.combat:
+                            if occ.id in (self.state.combat.encounter_npc_ids or []):
+                                self.state.combat.encounter_npc_ids.remove(occ.id)
+                        patches.append({"op": "set_cell",
+                                        "path": f"{cx},{cy}",
+                                        "value": cell.to_dict()})
+                        continue
+                    for b in buffs:
+                        b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
+                    occ.Buffs[:] = [b for b in buffs if b.get("Duration", 0) > 0]
+                    patches.append({"op": "set_cell",
+                                    "path": f"{cx},{cy}",
+                                    "value": cell.to_dict()})
+
                 if patches:
                     await self._broadcast({"type": "STATE_PATCH", "patches": patches})
             except Exception:
@@ -444,9 +480,18 @@ class GameServer:
     async def _apply_damage_and_buffs(self, attacker, target, total: int,
                                        action: dict, cell: Tuple[int, int],
                                        attacker_name: str = "", action_name: str = "") -> None:
-        """Apply damage/heal to target, then apply GivesBuff if action specifies."""
+        """Apply damage/heal (with Defense Modifier) then apply GivesBuffs list."""
         patches = []
         target_name = getattr(target, "Name", "?")
+
+        # ── Defense Modifier (flat damage reduction/increase) ─────────────────
+        if total > 0:
+            target_buffs = getattr(target, "Buffs", [])
+            if isinstance(target_buffs, list):
+                def_mod = sum(b.get("Value", 0) for b in target_buffs
+                              if b.get("Type") == "Defense Modifier")
+                if def_mod:
+                    total = max(1, total - def_mod)
 
         if total > 0:
             target.CurrentHP = max(0, target.CurrentHP - total)
@@ -459,13 +504,21 @@ class GameServer:
                 f"{attacker_name} heals {target_name} for {abs(total)} HP with {action_name}.",
                 "combat_heal")
 
-        # Apply GivesBuff
-        if action and action.get("GivesBuff"):
-            buff_name = action.get("BuffName", "")
-            buff_val = action.get("BuffValue", 0)
-            buff_dur = float(action.get("BuffDuration", 0))
-            if buff_name:
-                await self._apply_buff(target, buff_name, buff_val, buff_dur, patches)
+        # ── Apply GivesBuffs list (supports legacy single-buff too) ──────────
+        gives_buffs = []
+        if action:
+            if action.get("GivesBuffs"):
+                gives_buffs = action["GivesBuffs"]
+            elif action.get("GivesBuff"):
+                gives_buffs = [{
+                    "Name":     action.get("BuffName", ""),
+                    "Type":     "Stat Modifier",
+                    "Value":    action.get("BuffValue", 0),
+                    "Duration": float(action.get("BuffDuration", 5)),
+                }]
+        for buff_def in gives_buffs:
+            if buff_def.get("Name"):
+                await self._apply_buff_def(target, buff_def, patches)
 
         cx, cy = cell
         if isinstance(target, NPC):
@@ -491,41 +544,77 @@ class GameServer:
 
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
-    # kept as thin wrapper for legacy code paths
     async def _apply_damage(self, target, total: int, cell: Tuple[int, int]) -> None:
         if target is None:
             return
         await self._apply_damage_and_buffs(target, target, total, None, cell)
 
-    async def _apply_buff(self, entity, buff_name: str, value: int,
-                          duration: float, patches: list) -> None:
-        """Apply a buff entry to entity. Handles Dispell and Agility."""
+    async def _apply_buff_def(self, entity, buff_def: dict, patches: list) -> None:
+        """Apply a single buff definition dict to entity."""
         buffs = getattr(entity, "Buffs", None)
-        if buffs is None:
+        if not isinstance(buffs, list):
             return
-
-        if buff_name == "Dispell" or (value == 0 and duration == 0):
-            if buff_name == "Dispell":
-                entity.Buffs.clear()
-            else:
-                entity.Buffs.pop(buff_name, None)
+        name = buff_def.get("Name", "")
+        if name == "Dispell":
+            entity.Buffs.clear()
+            return
+        val   = int(buff_def.get("Value", 0))
+        dur   = float(buff_def.get("Duration", 1))
+        if val == 0 and dur <= 0:
+            # Remove matching named buff
+            entity.Buffs[:] = [b for b in entity.Buffs if b.get("Name") != name]
+            return
+        new_buff = {
+            "Name":     name,
+            "Type":     buff_def.get("Type", "Stat Modifier"),
+            "Value":    val,
+            "Duration": dur,
+        }
+        if buff_def.get("Stat"):
+            new_buff["Stat"] = buff_def["Stat"]
+        # Replace existing same-name entry or append
+        for i, b in enumerate(entity.Buffs):
+            if b.get("Name") == name:
+                entity.Buffs[i] = new_buff
+                break
         else:
-            entity.Buffs[buff_name] = {"Value": value, "Duration": duration}
-            # Agility during combat: add extra turn slots for players AND NPCs
-            if buff_name == "Agility" and self.state.combat and self.state.combat.active:
-                entity_type = "player" if isinstance(entity, PlayerObject) else "npc"
-                for _ in range(value):
-                    from game.combat import roll_initiative
-                    init = roll_initiative(entity)
-                    from game.state import CombatTurn
-                    new_turn = CombatTurn(combatant_type=entity_type,
-                                          id=entity.id,
-                                          name=entity.Name,
-                                          initiative=init)
-                    ins = self.state.combat.current_index + 1
-                    self.state.combat.turn_queue.insert(ins, new_turn)
-                patches.append({"op": "set_combat",
-                                "value": self.state.combat.to_dict()})
+            entity.Buffs.append(new_buff)
+        # Turn Modifier → add extra combat turn slots
+        if new_buff["Type"] == "Turn Modifier" and self.state.combat and self.state.combat.active:
+            from game.combat import roll_initiative
+            from game.state import CombatTurn
+            etype = "player" if isinstance(entity, PlayerObject) else "npc"
+            for _ in range(val):
+                init = roll_initiative(entity)
+                turn = CombatTurn(combatant_type=etype, id=entity.id,
+                                   name=entity.Name, initiative=init)
+                self.state.combat.turn_queue.insert(
+                    self.state.combat.current_index + 1, turn)
+            patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
+
+    async def _apply_hot_buffs(self, entity, name: str) -> None:
+        """
+        Apply all HP Over Time buffs to entity in heal-first order.
+        Each buff gets its own colour-coded chat message.
+        """
+        buffs = getattr(entity, "Buffs", [])
+        if not isinstance(buffs, list):
+            return
+        hot = [b for b in buffs if b.get("Type") == "HP Over Time"]
+        heals   = [b for b in hot if b.get("Value", 0) > 0]
+        damages = [b for b in hot if b.get("Value", 0) < 0]
+        for buff in heals:
+            amt = buff.get("Value", 0)
+            entity.CurrentHP = min(entity.MaximumHP, entity.CurrentHP + amt)
+            await self._broadcast_combat_chat(
+                f"{name} regenerates {amt} HP from [{buff.get('Name', 'Buff')}].",
+                "combat_heal")
+        for buff in damages:
+            amt = abs(buff.get("Value", 0))
+            entity.CurrentHP = max(0, entity.CurrentHP - amt)
+            await self._broadcast_combat_chat(
+                f"{name} takes {amt} damage from [{buff.get('Name', 'Buff')}].",
+                "combat_damage")
 
     async def _broadcast_combat_chat(self, text: str, msg_type: str = "system") -> None:
         await self._broadcast({"type": "CHAT_RECV", "message": {
@@ -537,42 +626,40 @@ class GameServer:
 
     async def _process_turn_end_buffs(self, entity_id: str,
                                       entity_type: str) -> None:
-        """Apply DoT (Poison/Burn) and tick Duration at end of turn."""
+        """
+        Called at the end of a combatant's turn.
+        1. Apply HP Over Time buffs individually (heals then damage).
+        2. Tick buff durations by 1 minute; remove expired buffs.
+        """
         if entity_type == "player":
             entity = self.state.players.get(entity_id)
+            cell = None
         else:
             cell = self.state.find_object_cell(entity_id)
             entity = self.state.grid[cell].occupant if cell else None
         if entity is None:
             return
 
-        buffs = getattr(entity, "Buffs", {})
-        patches = []
-        dot = 0
-        if "Poison" in buffs:
-            dot += buffs["Poison"].get("Value", 1)
-        if "Burn" in buffs:
-            dot += buffs["Burn"].get("Value", 1)
-        if dot > 0:
-            entity.CurrentHP = max(0, entity.CurrentHP - dot)
-            await self._broadcast_combat_chat(
-                f"{getattr(entity,'Name','?')} takes {dot} damage from status effects.",
-                "combat_damage")
+        buffs: list = getattr(entity, "Buffs", [])
+        if not isinstance(buffs, list):
+            return
 
-        # Tick durations (1 min per turn-end during combat)
-        expired = [k for k, b in list(buffs.items())
-                   if b.get("Duration", 0) - 1 <= 0]
-        for k, b in list(buffs.items()):
+        name = getattr(entity, "Name", "?")
+
+        # ── HP Over Time (heals first, then damage, each individually) ────────
+        await self._apply_hot_buffs(entity, name)
+
+        # ── Tick durations ────────────────────────────────────────────────────
+        for b in buffs:
             b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
-        for k in expired:
-            del buffs[k]
+        entity.Buffs[:] = [b for b in buffs if b.get("Duration", 0) > 0]
 
+        patches = []
         if entity_type == "player":
             patches.append({"op": "set_player", "path": entity_id,
                              "value": entity.to_dict()})
         else:
-            cx, cy = cell
-            patches.append({"op": "set_cell", "path": f"{cx},{cy}",
+            patches.append({"op": "set_cell", "path": f"{cell[0]},{cell[1]}",
                              "value": self.state.grid[cell].to_dict()})
         if patches:
             await self._broadcast({"type": "STATE_PATCH", "patches": patches})
@@ -905,8 +992,51 @@ class GameServer:
         new_obj = occupant_from_dict(obj_d)
         if new_obj is None:
             return
+
+        patches = []
+
+        # ── Bidirectional Stairs linking ──────────────────────────────────────
+        if isinstance(new_obj, Stairs) and isinstance(cell.occupant, Stairs):
+            old_link = cell.occupant.LinkedStair
+            new_link = new_obj.LinkedStair
+
+            if old_link != new_link:
+                # Unlink this stair's previous partner
+                if old_link:
+                    old_b_pos = self.state.find_object_cell(old_link)
+                    if old_b_pos:
+                        old_b_cell = self.state.grid.get(old_b_pos)
+                        if old_b_cell and isinstance(old_b_cell.occupant, Stairs):
+                            old_b_cell.occupant.LinkedStair = ""
+                            patches.append({"op": "set_cell",
+                                            "path": f"{old_b_pos[0]},{old_b_pos[1]}",
+                                            "value": old_b_cell.to_dict()})
+
+                # Link new partner back to this stair
+                if new_link:
+                    new_b_pos = self.state.find_object_cell(new_link)
+                    if new_b_pos:
+                        new_b_cell = self.state.grid.get(new_b_pos)
+                        if new_b_cell and isinstance(new_b_cell.occupant, Stairs):
+                            # Unlink new partner's previous partner first
+                            b_old_link = new_b_cell.occupant.LinkedStair
+                            if b_old_link and b_old_link != cell.occupant.id:
+                                b_old_pos = self.state.find_object_cell(b_old_link)
+                                if b_old_pos:
+                                    b_old_cell = self.state.grid.get(b_old_pos)
+                                    if b_old_cell and isinstance(b_old_cell.occupant, Stairs):
+                                        b_old_cell.occupant.LinkedStair = ""
+                                        patches.append({"op": "set_cell",
+                                                        "path": f"{b_old_pos[0]},{b_old_pos[1]}",
+                                                        "value": b_old_cell.to_dict()})
+                            # Point new partner back at this stair
+                            new_b_cell.occupant.LinkedStair = new_obj.id
+                            patches.append({"op": "set_cell",
+                                            "path": f"{new_b_pos[0]},{new_b_pos[1]}",
+                                            "value": new_b_cell.to_dict()})
+
         cell.occupant = new_obj
-        patches = [{"op": "set_cell", "path": f"{cx},{cy}", "value": cell.to_dict()}]
+        patches.append({"op": "set_cell", "path": f"{cx},{cy}", "value": cell.to_dict()})
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
     async def _h_dm_move_object(self, conn: ClientConn, msg: dict) -> None:

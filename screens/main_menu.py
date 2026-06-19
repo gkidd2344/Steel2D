@@ -19,6 +19,7 @@ class MainMenuScreen(tk.Frame):
                  on_host: Callable,
                  on_join: Callable,
                  on_quit: Callable,
+                 on_dm_tool: Callable = None,
                  **kwargs):
         super().__init__(parent, bg=PALETTE["bg"], **kwargs)
         self._user_config = user_config
@@ -26,6 +27,7 @@ class MainMenuScreen(tk.Frame):
         self._on_host = on_host
         self._on_join = on_join
         self._on_quit = on_quit
+        self._on_dm_tool = on_dm_tool
         self._avatar_img = None
         self._build()
 
@@ -89,6 +91,11 @@ class MainMenuScreen(tk.Frame):
                 fg=PALETTE["warning"],
                 font=FONTS["small"]
             ).pack(pady=(0, 8))
+
+        # ── DM Workshop ───────────────────────────────────────────────────────
+        if self._on_dm_tool:
+            flat_btn(card, "🛠  DM Workshop", self._on_dm_tool,
+                     style="spectre").pack(fill=tk.X, pady=(0, 4), ipady=4)
 
         # ── Host / Join inline ────────────────────────────────────────────────
         hj_row = tk.Frame(card, bg=PALETTE["card"])

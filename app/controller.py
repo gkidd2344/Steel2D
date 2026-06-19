@@ -1,12 +1,13 @@
+import json
 import queue
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
-from typing import Optional
+from typing import Optional, List
 
 from app.constants import PALETTE, FONTS
-from app.config import load_user_config, save_user_config, get_base_dir
+from app.config import load_user_config, save_user_config, get_base_dir, get_prefabs_dir
 
 
 class App(tk.Tk):
@@ -21,9 +22,12 @@ class App(tk.Tk):
         self._ui_queue: Optional[queue.Queue] = None
         self._client = None
         self._server = None
+        self.prefabs: List[dict] = []   # loaded prefab objects (DM-hosted games only)
         self.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.bind("<<GoMainMenu>>", lambda e: self.show_main_menu())
         self.show_main_menu()
+
+    # ── screens ───────────────────────────────────────────────────────────────
 
     def show_main_menu(self) -> None:
         self._cleanup_session()
@@ -35,6 +39,7 @@ class App(tk.Tk):
             parent,
             user_config=self._user_config,
             on_profile=self.show_profile,
+            on_dm_tool=self.show_dm_tool,
             on_host=self._host_flow,
             on_join=self._join_flow,
             on_quit=self.on_quit,
@@ -55,6 +60,15 @@ class App(tk.Tk):
     def _on_profile_saved(self, updated_config: dict) -> None:
         self._user_config = updated_config
         self.show_main_menu()
+
+    def show_dm_tool(self) -> None:
+        self._swap_screen(lambda p: self._make_dm_tool(p))
+
+    def _make_dm_tool(self, parent):
+        from screens.dm_tool import DmToolScreen
+        return DmToolScreen(parent, on_exit=self.show_main_menu)
+
+    # ── host / join flows ─────────────────────────────────────────────────────
 
     def _host_flow(self) -> None:
         from dialogs.host_dialog import HostDialog
@@ -78,6 +92,8 @@ class App(tk.Tk):
         LoadGameDialog(self, on_load=self._launch_dm_game)
 
     def _launch_dm_game(self, state) -> None:
+        self._load_all_prefabs()       # populate self.prefabs before game starts
+
         self._ui_queue = queue.Queue()
         uid = self._user_config["uuid"]
         alias = self._user_config.get("alias", "DM")
@@ -115,12 +131,11 @@ class App(tk.Tk):
             self.show_main_menu()
             return
 
-        welcome_state = state
-
         from screens.game import GameScreen
         self._swap_screen(lambda p: GameScreen(
-            p, welcome_state, client, server, self._ui_queue,
+            p, state, client, server, self._ui_queue,
             local_uuid=uid, is_dm=True,
+            prefabs=list(self.prefabs),
         ))
 
     def _join_flow(self) -> None:
@@ -154,7 +169,8 @@ class App(tk.Tk):
             except queue.Empty:
                 self.after(0, lambda: self._join_failed("Connection timed out."))
                 return
-            self.after(0, lambda et=event_type, p=payload: self._handle_connect(et, p, connecting_label))
+            self.after(0, lambda et=event_type, p=payload:
+                       self._handle_connect(et, p, connecting_label))
 
         threading.Thread(target=_wait, daemon=True).start()
 
@@ -190,6 +206,23 @@ class App(tk.Tk):
     def _join_failed(self, reason: str) -> None:
         messagebox.showerror("Error", reason)
         self.show_main_menu()
+
+    # ── prefab loading ────────────────────────────────────────────────────────
+
+    def _load_all_prefabs(self) -> None:
+        """Load all prefab JSON files from the prefabs directory into self.prefabs."""
+        self.prefabs = []
+        prefabs_dir = get_prefabs_dir()
+        for path in sorted(prefabs_dir.glob("*.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for obj in data.get("objects", []):
+                    self.prefabs.append(dict(obj))
+            except Exception:
+                pass
+
+    # ── utilities ─────────────────────────────────────────────────────────────
 
     def _swap_screen(self, factory) -> None:
         if self._current_screen:

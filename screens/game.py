@@ -26,7 +26,8 @@ if TYPE_CHECKING:
 class GameScreen(tk.Frame):
     def __init__(self, parent, state: GameState, client: "GameClient",
                  server: Optional["GameServer"], ui_queue: queue.Queue,
-                 local_uuid: str, is_dm: bool, **kwargs):
+                 local_uuid: str, is_dm: bool,
+                 prefabs: list = None, **kwargs):
         super().__init__(parent, bg=PALETTE["bg"], **kwargs)
         self.state = state
         self.client = client
@@ -34,6 +35,7 @@ class GameScreen(tk.Frame):
         self.ui_queue = ui_queue
         self.local_uuid = local_uuid
         self.is_dm = is_dm
+        self.prefabs: list = prefabs or []
         self._latencies: dict = {}
         self._player_list_overlay = None
         self._turn_panel = None
@@ -829,6 +831,12 @@ class GameScreen(tk.Frame):
                                "Name": "Stairs", "Direction": "Up", "LinkedStair": ""}
                 })
             )
+            if self.prefabs:
+                menu.add_separator()
+                menu.add_command(
+                    label="Spawn Prefab…",
+                    command=lambda: self._open_spawn_prefab(gx, gy)
+                )
 
         if uuids:
             menu.add_separator()
@@ -862,13 +870,28 @@ class GameScreen(tk.Frame):
 
         menu.tk_popup(sx, sy)
 
+    def _open_spawn_prefab(self, gx: int, gy: int) -> None:
+        from dialogs.spawn_prefab_dialog import SpawnPrefabDialog
+
+        def _do_spawn(obj_d: dict) -> None:
+            self._send({"type": "DM_SPAWN_OBJECT",
+                        "cell": [gx, gy], "object": obj_d})
+
+        SpawnPrefabDialog(self.winfo_toplevel(), self.prefabs, on_spawn=_do_spawn)
+
     def _dm_spawn(self, gx, gy) -> None:
         from dialogs.spawn_object_dialog import SpawnObjectDialog
+
+        def _on_spawn(obj_d):
+            self._send({"type": "DM_SPAWN_OBJECT", "cell": [gx, gy], "object": obj_d})
+            # Add to session prefabs so it appears in Spawn Prefab list
+            self.prefabs.append(dict(obj_d))
+
         SpawnObjectDialog(
             self.winfo_toplevel(),
-            on_spawn=lambda obj_d: self._send(
-                {"type": "DM_SPAWN_OBJECT", "cell": [gx, gy], "object": obj_d}),
+            on_spawn=_on_spawn,
             settings=self.state.settings,
+            prefabs=self.prefabs,
         )
 
     def _dm_modify_object(self, gx, gy, obj) -> None:
@@ -880,6 +903,7 @@ class GameScreen(tk.Frame):
             settings=self.state.settings,
             existing=obj,
             title="Modify Object",
+            prefabs=self.prefabs,
         )
 
     def _dm_modify_player(self, player_uuid: str, player: PlayerObject) -> None:

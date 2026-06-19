@@ -3,6 +3,29 @@ import base64
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 
+BUFF_TYPES = ("HP Over Time", "Stat Modifier", "Turn Modifier", "Defense Modifier")
+
+
+def _migrate_buffs(raw) -> List[dict]:
+    """Convert old Dict[str, dict] Buffs format to the new List[dict] format."""
+    if isinstance(raw, list):
+        return list(raw)
+    if not isinstance(raw, dict):
+        return []
+    result = []
+    for name, val in raw.items():
+        t = ("Turn Modifier" if name == "Agility" else "Stat Modifier")
+        entry = {
+            "Name":     name,
+            "Type":     t,
+            "Value":    int(val.get("Value", 0)),
+            "Duration": float(val.get("Duration", 1)),
+        }
+        if t == "Stat Modifier" and name in STAT_KEYS:
+            entry["Stat"] = name
+        result.append(entry)
+    return result
+
 from app.config import STAT_KEYS
 
 
@@ -21,7 +44,7 @@ class NPC:
     Scalars: Optional[Dict[str, str]] = None
     Actions: Optional[Dict[str, dict]] = None
     TurnsAllowed: int = 1
-    Buffs: Dict[str, dict] = field(default_factory=dict)
+    Buffs: List[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -57,7 +80,7 @@ class NPC:
             Scalars=d.get("Scalars"),
             Actions=d.get("Actions"),
             TurnsAllowed=max(1, int(d.get("TurnsAllowed", 1))),
-            Buffs=d.get("Buffs", {}),
+            Buffs=_migrate_buffs(d.get("Buffs", [])),
         )
 
 
@@ -152,9 +175,9 @@ class PlayerObject:
     Equipment: Dict[int, "Item"] = field(default_factory=dict)
     Inventory: List["Item"] = field(default_factory=list)
     avatar_png: Optional[bytes] = None
-    # Buffs: key → {"Value": int, "Duration": float (minutes)}
-    # Special keys: stat names, "Agility", "Poison", "Burn", "Dispell"
-    Buffs: Dict[str, dict] = field(default_factory=dict)
+    # Buffs: list of {Name, Type, Value, Duration, ?Stat}
+    # Types: "HP Over Time" | "Stat Modifier" | "Turn Modifier" | "Defense Modifier"
+    Buffs: List[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -192,7 +215,7 @@ class PlayerObject:
             Equipment=equipment,
             Inventory=inventory,
             avatar_png=avatar_png,
-            Buffs=d.get("Buffs", {}),
+            Buffs=_migrate_buffs(d.get("Buffs", [])),
         )
 
 

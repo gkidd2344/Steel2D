@@ -33,9 +33,8 @@ def calc_max_hp(size: str, level: int, con: int, multiplier: float) -> int:
 
 
 def effective_stat(entity, key: str) -> int:
-    """Return base + equipment bonus + buff modifiers for any stat-bearing entity."""
+    """Return base + equipment bonus + Stat Modifier buff modifiers."""
     base = entity.Stats.get(key, 0)
-    # Equipment bonus (PlayerObject only)
     equip = 0
     if hasattr(entity, "Equipment"):
         equip = sum(
@@ -43,13 +42,12 @@ def effective_stat(entity, key: str) -> int:
             for item in entity.Equipment.values()
             if item.Stats is not None
         )
-    # Buff modifiers
-    buffs = getattr(entity, "Buffs", {})
-    buff_mod = buffs.get(key, {}).get("Value", 0) if key in buffs else 0
-    if key == "Dex" and "Poison" in buffs:
-        buff_mod -= 1
-    if key == "Str" and "Burn" in buffs:
-        buff_mod -= 1
+    buff_mod = 0
+    buffs = getattr(entity, "Buffs", [])
+    if isinstance(buffs, list):
+        for b in buffs:
+            if b.get("Type") == "Stat Modifier" and b.get("Stat") == key:
+                buff_mod += b.get("Value", 0)
     return base + equip + buff_mod
 
 
