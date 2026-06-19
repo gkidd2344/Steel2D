@@ -32,14 +32,25 @@ def calc_max_hp(size: str, level: int, con: int, multiplier: float) -> int:
     return max(1, math.ceil(multiplier * (size_val + level * con_bonus)))
 
 
-def effective_stat(player: "PlayerObject", key: str) -> int:
-    base = player.Stats.get(key, 0)
-    bonus = sum(
-        item.Stats.get(key, 0)
-        for item in player.Equipment.values()
-        if item.Stats is not None
-    )
-    return base + bonus
+def effective_stat(entity, key: str) -> int:
+    """Return base + equipment bonus + buff modifiers for any stat-bearing entity."""
+    base = entity.Stats.get(key, 0)
+    # Equipment bonus (PlayerObject only)
+    equip = 0
+    if hasattr(entity, "Equipment"):
+        equip = sum(
+            item.Stats.get(key, 0)
+            for item in entity.Equipment.values()
+            if item.Stats is not None
+        )
+    # Buff modifiers
+    buffs = getattr(entity, "Buffs", {})
+    buff_mod = buffs.get(key, {}).get("Value", 0) if key in buffs else 0
+    if key == "Dex" and "Poison" in buffs:
+        buff_mod -= 1
+    if key == "Str" and "Burn" in buffs:
+        buff_mod -= 1
+    return base + equip + buff_mod
 
 
 def default_attack_damage(combatant) -> int:

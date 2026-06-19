@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Union
 
-from game.objects import NPC, Item, Door, PlayerObject, occupant_from_dict
+from game.objects import NPC, Item, Door, Wall, PlayerObject, occupant_from_dict
 
 
 @dataclass
@@ -31,12 +31,14 @@ class GameSettings:
 class Cell:
     walkable: bool = False
     protected: bool = False
+    tile_type: str = "ground"   # "ground" | "water"
     occupant: Optional[Union[NPC, Item, Door]] = None
 
     def to_dict(self) -> dict:
         return {
             "walkable": self.walkable,
             "protected": self.protected,
+            "tile_type": self.tile_type,
             "occupant": self.occupant.to_dict() if self.occupant else None,
         }
 
@@ -45,8 +47,14 @@ class Cell:
         return cls(
             walkable=d.get("walkable", False),
             protected=d.get("protected", False),
+            tile_type=d.get("tile_type", "ground"),
             occupant=occupant_from_dict(d.get("occupant")),
         )
+
+
+MOVE_COST   = 1.5   # points per movement
+ACTION_COST = 2.0   # points per action
+TURN_THRESHOLD = 3.0  # auto-end when points_spent >= this
 
 
 @dataclass
@@ -55,8 +63,16 @@ class CombatTurn:
     id: str
     name: str
     initiative: int
-    has_moved: bool = False
     has_acted: bool = False
+    points_spent: float = 0.0
+
+    @property
+    def can_move(self) -> bool:
+        return self.points_spent < TURN_THRESHOLD
+
+    @property
+    def can_act(self) -> bool:
+        return not self.has_acted and self.points_spent < TURN_THRESHOLD
 
     def to_dict(self) -> dict:
         return {
@@ -64,19 +80,22 @@ class CombatTurn:
             "id": self.id,
             "name": self.name,
             "initiative": self.initiative,
-            "has_moved": self.has_moved,
             "has_acted": self.has_acted,
+            "points_spent": self.points_spent,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CombatTurn":
+        # back-compat: old saves used has_moved
+        old_moved = d.get("has_moved", False)
+        ps = float(d.get("points_spent", MOVE_COST if old_moved else 0.0))
         return cls(
             combatant_type=d["combatant_type"],
             id=d["id"],
             name=d["name"],
             initiative=d["initiative"],
-            has_moved=d.get("has_moved", False),
             has_acted=d.get("has_acted", False),
+            points_spent=ps,
         )
 
 

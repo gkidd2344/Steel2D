@@ -9,8 +9,10 @@ def flat_btn(parent, text: str, command=None, style: str = "normal",
         "normal":  (PALETTE["accent"],  "#ffffff"),
         "danger":  (PALETTE["danger"],  "#ffffff"),
         "success": (PALETTE["success"], "#ffffff"),
-        "ghost":   (PALETTE["card2"],   PALETTE["fg"]),
         "muted":   (PALETTE["card"],    PALETTE["fg_dim"]),
+        "ghost":   (PALETTE["card2"],   PALETTE["fg"]),
+        "rest":    (PALETTE["rest"],    PALETTE["fg"]),
+        "fight":   (PALETTE["fight"],   PALETTE["fg"]),
     }
     bg, fg = colours.get(style, colours["normal"])
     opts = dict(

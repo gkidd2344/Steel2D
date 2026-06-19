@@ -12,7 +12,7 @@ except ImportError:
     HAS_PIL = False
 
 from app.constants import BASE_CELL_PX, ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, PALETTE
-from game.objects import NPC, Item, Door, PlayerObject
+from game.objects import NPC, Item, Door, Wall, PlayerObject
 from game.state import GameState
 from game.los import has_los, cells_in_range
 
@@ -39,6 +39,16 @@ class GameCanvas(tk.Canvas):
         self._drag_source: Optional[Tuple[int, int]] = None
         self._drag_mouse: Optional[Tuple[int, int]] = None
         self._drag_obj = None
+        self._painting: bool = False
+        self._paint_type: str = "ground"   # "ground" | "water" | "wall"
+        self._painted_cells: Set[Tuple[int, int]] = set()
+        self._erasing: bool = False
+        self._erased_cells: Set[Tuple[int, int]] = set()
+        # Set by GameScreen key bindings
+        self.u_held: bool = False
+        self.y_held: bool = False
+        self._erasing: bool = False
+        self._erased_cells: Set[Tuple[int, int]] = set()
 
         self.bubbles: List[dict] = []
 
@@ -49,13 +59,17 @@ class GameCanvas(tk.Canvas):
         self._img_cache: Dict[Tuple, object] = {}
         self._anim_frame = 0
 
-        self.bind("<Motion>", self._on_motion)
-        self.bind("<Button-1>", self._on_left_click)
-        self.bind("<Button-3>", self._on_right_click)
-        self.bind("<ButtonPress-1>", self._on_drag_start)
-        self.bind("<B1-Motion>", self._on_drag_move)
+        # Single binding per button — <Button-1> and <ButtonPress-1> are
+        # the same Tk event; binding both overwrites the first.
+        self.bind("<Motion>",          self._on_motion)
+        self.bind("<Button-1>",        self._on_left_press)
+        self.bind("<B1-Motion>",       self._on_drag_move)
         self.bind("<ButtonRelease-1>", self._on_drag_end)
-        self.bind("<MouseWheel>", self._on_scroll)
+        self.bind("<Button-3>",        self._on_right_click)
+        self.bind("<Button-2>",        self._on_middle_press)
+        self.bind("<B2-Motion>",       self._on_middle_drag)
+        self.bind("<ButtonRelease-2>", self._on_middle_release)
+        self.bind("<MouseWheel>",      self._on_scroll)
 
         self._redraw()
 
@@ -166,18 +180,39 @@ class GameCanvas(tk.Canvas):
             self.create_line(0, y, w, y, fill=color, width=1)
             y += cell_px
 
+    _TILE_COLORS = {
+        "ground": "#ffffff",
+        "water":  "#a8d8ea",   # light pastel blue
+    }
+
     def _draw_tiles(self, min_cx, max_cx, min_cy, max_cy, cell_px) -> None:
         pad = 2 * self.zoom
-        for (gx, gy), cell in self.state.grid.items():
-            if not cell.walkable:
-                continue
+        grid = self.state.grid
+
+        def _water_neighbor(nx, ny) -> bool:
+            c = grid.get((nx, ny))
+            return c is not None and c.tile_type == "water"
+
+        for (gx, gy), cell in grid.items():
             if not (min_cx <= gx <= max_cx and min_cy <= gy <= max_cy):
                 continue
+            tile_type = cell.tile_type
+            color = self._TILE_COLORS.get(tile_type)
+            if color is None:
+                continue
             x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
-            self.create_rectangle(
-                x0 + pad, y0 + pad, x1 - pad, y1 - pad,
-                fill=PALETTE["tile"], outline="", tags="tile",
-            )
+
+            if tile_type == "water":
+                # Extend toward adjacent water tiles to close the inter-cell gap
+                ax0 = x0 if _water_neighbor(gx - 1, gy) else x0 + pad
+                ay0 = y0 if _water_neighbor(gx, gy - 1) else y0 + pad
+                ax1 = x1 if _water_neighbor(gx + 1, gy) else x1 - pad
+                ay1 = y1 if _water_neighbor(gx, gy + 1) else y1 - pad
+                self.create_rectangle(ax0, ay0, ax1, ay1,
+                                      fill=color, outline="", tags="tile")
+            else:
+                self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+                                      fill=color, outline="", tags="tile")
 
     def _draw_combat_highlights(self, cell_px: float) -> None:
         if not (self.state.combat and self.state.combat.active):
@@ -188,7 +223,7 @@ class GameCanvas(tk.Canvas):
         cur = tq[self.state.combat.current_index]
 
         cur_cell = self._find_combatant_cell(cur)
-        if cur_cell and not cur.has_moved:
+        if cur_cell and cur.can_move:
             cx, cy = cur_cell
             for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
                 nx, ny = cx + dx, cy + dy
@@ -206,15 +241,7 @@ class GameCanvas(tk.Canvas):
                                       fill="#ff4400", stipple="gray25",
                                       outline="#ff4400", tags="highlight")
 
-        if cur_cell:
-            x0, y0, x1, y1 = self._cell_rect(cur_cell[0], cur_cell[1], cell_px)
-            dash_offset = self._anim_frame % 6
-            self.create_rectangle(
-                x0 - 4, y0 - 4, x1 + 4, y1 + 4,
-                outline="#ffffff", width=3,
-                dash=(4, 2), dashoffset=dash_offset,
-                tags="glow",
-            )
+        # Glow removed per request (item 3)
 
     def _find_combatant_cell(self, turn) -> Optional[Tuple[int, int]]:
         if turn.combatant_type == "player":
@@ -244,26 +271,44 @@ class GameCanvas(tk.Canvas):
                 self._draw_item(x0, y0, x1, y1, cx, cy, cell_px)
             elif isinstance(obj, Door):
                 self._draw_door(obj, x0, y0, x1, y1, cx, cy)
+            elif isinstance(obj, Wall):
+                self._draw_wall(gx, gy, x0, y0, x1, y1)
 
     def _draw_npc(self, npc: NPC, x0, y0, x1, y1, cx, cy, pad) -> None:
-        size = min(x1 - x0, y1 - y0) * 0.70
+        size = min(x1 - x0, y1 - y0) * 0.595
+        # Icon floats from the bottom of the tile.
+        # Tile has 2*zoom inward pad; leave an additional 4*zoom gap above tile edge.
+        icon_bottom = y1 - 2 * self.zoom - 4 * self.zoom
         if npc.Hostile:
-            h = size / 2
-            pts = [cx, y0 + pad, cx - h * 0.866, y1 - pad, cx + h * 0.866, y1 - pad]
+            s = size
+            h_tri = s * 0.866   # equilateral triangle height
+            base_y = icon_bottom
+            apex_y = base_y - h_tri
+            pts = [cx, apex_y, cx - s / 2, base_y, cx + s / 2, base_y]
             self.create_polygon(pts, fill="#cc2222", outline="#880000", width=2)
         else:
             r = size / 2
-            self.create_oval(cx - r, cy - r, cx + r, cy + r,
+            center_y = icon_bottom - r
+            self.create_oval(cx - r, center_y - r, cx + r, center_y + r,
                              fill="#22aa22", outline="#115511", width=2)
         self._draw_hp_bar(npc, x0, y0, x1)
 
     def _draw_hp_bar(self, entity, x0, y0, x1) -> None:
-        bw = x1 - x0 - 4
+        if not self.is_dm:
+            return
+        pad_side = 10 * self.zoom
+        bw = (x1 - x0) - pad_side * 2
         bh = max(3, 4 * self.zoom)
-        by = y0 + 2
+        by = y0 + 8 * self.zoom
         ratio = entity.CurrentHP / max(entity.MaximumHP, 1)
-        self.create_rectangle(x0 + 2, by, x1 - 2, by + bh, fill="#333", outline="")
-        self.create_rectangle(x0 + 2, by, x0 + 2 + bw * ratio, by + bh,
+        # 2px black outer border
+        self.create_rectangle(x0 + pad_side - 2, by - 2,
+                              x1 - pad_side + 2, by + bh + 2,
+                              fill="#000000", outline="")
+        self.create_rectangle(x0 + pad_side, by, x1 - pad_side, by + bh,
+                              fill="#333", outline="")
+        self.create_rectangle(x0 + pad_side, by,
+                              x0 + pad_side + bw * ratio, by + bh,
                               fill="#44ee44", outline="")
 
     def _draw_item(self, x0, y0, x1, y1, cx, cy, cell_px) -> None:
@@ -280,7 +325,7 @@ class GameCanvas(tk.Canvas):
         pad = 2
         if door.Open:
             self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
-                                  fill="", outline="#8b4513", width=7)
+                                  fill="", outline="#8b4513", width=6)
         else:
             self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
                                   fill="#8b4513", outline="#5c2d0a", width=2)
@@ -293,6 +338,25 @@ class GameCanvas(tk.Canvas):
             s = min(x1 - x0, y1 - y0) * 0.2
             self.create_oval(cx - s, cy - s, cx + s, cy + s,
                              fill="#ffcc00", outline="#cc9900", width=1)
+
+    def _draw_wall(self, gx: int, gy: int,
+                   x0: float, y0: float, x1: float, y1: float) -> None:
+        WALL_COLOR = "#888888"
+        pad = 2 * self.zoom
+
+        def _has_wall(nx, ny) -> bool:
+            c = self.state.grid.get((nx, ny))
+            return c is not None and isinstance(c.occupant, Wall)
+
+        # Extend toward each neighbor that also has a wall,
+        # filling the 2-pad gap between adjacent tiles.
+        ax0 = x0 if _has_wall(gx - 1, gy) else (x0 + pad)
+        ay0 = y0 if _has_wall(gx, gy - 1) else (y0 + pad)
+        ax1 = x1 if _has_wall(gx + 1, gy) else (x1 - pad)
+        ay1 = y1 if _has_wall(gx, gy + 1) else (y1 - pad)
+
+        self.create_rectangle(ax0, ay0, ax1, ay1,
+                              fill=WALL_COLOR, outline="", tags="wall")
 
     def _draw_players(self, cell_px: float) -> None:
         for key, uuids in self.state.players_at.items():
@@ -310,16 +374,21 @@ class GameCanvas(tk.Canvas):
                     y0 += offset
                     x1 += offset
                     y1 += offset
-                pad = cell_px * 0.1
-                self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+                h_pad = cell_px * 0.175   # 65% fill horizontally
+                # Float from bottom: 4*zoom gap above tile bottom edge
+                # (tile itself has 2*zoom inward padding)
+                icon_bottom = y1 - 2 * self.zoom - 4 * self.zoom
+                icon_h = cell_px * 0.65
+                icon_top = icon_bottom - icon_h
+                self.create_rectangle(x0 + h_pad, icon_top, x1 - h_pad, icon_bottom,
                                       fill=player.color,
                                       outline=_darken(player.color, 0.6),
                                       width=2)
                 if player.avatar_png and HAS_PIL:
-                    self._draw_avatar(player, x0, y0, x1, y1, cell_px)
+                    self._draw_avatar(player, x0, icon_top, x1, icon_bottom, cell_px)
                 else:
                     abbrev = (player.Name or "?")[:2].upper()
-                    self.create_text((x0 + x1) / 2, (y0 + y1) / 2,
+                    self.create_text((x0 + x1) / 2, (icon_top + icon_bottom) / 2,
                                      text=abbrev, fill="#ffffff",
                                      font=("Segoe UI", max(8, int(cell_px * 0.22)), "bold"))
                 self._draw_hp_bar(player, x0, y0, x1)
@@ -388,56 +457,68 @@ class GameCanvas(tk.Canvas):
         cell = self.state.grid.get((gx, gy))
         lines = []
 
-        if not cell:
-            if self.is_dm:
-                lines = [f"({gx}, {gy}) — empty"]
-        else:
-            uuids = self.state.players_at.get(f"{gx},{gy}", [])
-            if uuids:
-                for pid in uuids:
-                    p = self.state.players.get(pid)
-                    if p:
-                        lines.append(f"{p.Name}  HP {p.CurrentHP}/{p.MaximumHP}")
-                        if self.is_dm:
-                            for k in ("Str", "Dex", "Con", "Int", "Wis", "Cha"):
-                                lines.append(f"  {k}: {p.Stats.get(k, 0)}")
-            if cell.occupant:
-                obj = cell.occupant
-                pc = self._player_cell()
-                can_see = True
-                if not self.is_dm and pc:
-                    can_see = has_los(self.state, pc, (gx, gy),
-                                      self.state.settings.los_max_distance)
-                if isinstance(obj, NPC):
-                    if can_see:
-                        lines.append(f"NPC: {obj.Name}")
-                        if self.is_dm:
-                            lines += [obj.Description,
-                                      f"HP {obj.CurrentHP}/{obj.MaximumHP}",
-                                      f"Size: {obj.Size}  Hostile: {obj.Hostile}"]
-                        else:
-                            lines.append(obj.Description)
-                elif isinstance(obj, Item):
-                    if can_see:
-                        lines.append(f"Item: {obj.Name}")
-                        if self.is_dm:
-                            lines += [obj.Description,
-                                      f"Qty: {obj.Quantity}  Val: {obj.Value}g"]
-                        else:
-                            lines.append(obj.Description)
-                elif isinstance(obj, Door):
-                    if can_see:
-                        state_str = "Open" if obj.Open else "Closed"
-                        lines.append(f"Door — {state_str}")
-                        if obj.Locked:
-                            lines.append("Locked")
-                        if obj.Broken:
-                            lines.append("Broken")
-            if not lines and self.is_dm:
-                lines = [f"({gx}, {gy})"]
+        # Players on this cell
+        uuids = self.state.players_at.get(f"{gx},{gy}", [])
+        for pid in uuids:
+            p = self.state.players.get(pid)
+            if p:
+                if self.is_dm:
+                    lines.append(f"{p.Name}  HP {p.CurrentHP}/{p.MaximumHP}")
+                    for k in ("Str", "Dex", "Con", "Int", "Wis", "Cha"):
+                        lines.append(f"  {k}: {p.Stats.get(k, 0)}")
+                else:
+                    lines.append(p.Name)
 
+        # Occupant (NPC / Item / Door)
+        npc_included_location = False
+        if cell and cell.occupant:
+            obj = cell.occupant
+            pc = self._player_cell()
+            can_see = True
+            if not self.is_dm and pc:
+                can_see = has_los(self.state, pc, (gx, gy),
+                                  self.state.settings.los_max_distance)
+            if isinstance(obj, NPC):
+                if can_see:
+                    if self.is_dm:
+                        status = "Hostile" if obj.Hostile else "Friendly"
+                        lines += [
+                            obj.Name,
+                            f"Health: {obj.CurrentHP}/{obj.MaximumHP}",
+                            f"Size: {obj.Size}",
+                            f"Status: {status}",
+                            f"Location: ({gx}, {gy})",
+                        ]
+                        npc_included_location = True
+                    else:
+                        lines.append(obj.Name)
+                        if obj.Description:
+                            lines.append(obj.Description)
+            elif isinstance(obj, Item):
+                if can_see:
+                    lines.append(f"Item: {obj.Name}")
+                    if self.is_dm:
+                        if obj.Description:
+                            lines.append(obj.Description)
+                        lines.append(f"Qty: {obj.Quantity}  Val: {obj.Value}g")
+                    else:
+                        if obj.Description:
+                            lines.append(obj.Description)
+            elif isinstance(obj, Door):
+                if can_see:
+                    state_str = "Open" if obj.Open else "Closed"
+                    lines.append(f"Door — {state_str}")
+                    if obj.Locked:
+                        lines.append("Locked")
+                    if obj.Broken:
+                        lines.append("Broken")
+
+        # Append coordinates for all non-NPC tooltips (NPC format includes it inline)
         if not lines:
             return
+        if not npc_included_location:
+            lines.append(f"({gx}, {gy})")
+
 
         mx = self.winfo_pointerx() - self.winfo_rootx()
         my = self.winfo_pointery() - self.winfo_rooty()
@@ -461,7 +542,9 @@ class GameCanvas(tk.Canvas):
         if self._drag_obj:
             self._drag_mouse = (event.x, event.y)
 
-    def _on_left_click(self, event) -> None:
+    # ── left mouse (click + paint + object drag) ──────────────────────────────
+
+    def _on_left_press(self, event) -> None:
         gx, gy = self._canvas_to_cell(event.x, event.y)
 
         if self._combat_action is not None:
@@ -473,8 +556,83 @@ class GameCanvas(tk.Canvas):
 
         if self.is_dm:
             cell = self.state.grid.get((gx, gy))
-            if not cell or not cell.walkable:
-                self.send({"type": "DM_TILE_SET", "cell": [gx, gy], "walkable": True})
+
+            # ── DM NPC combat movement (click adjacent ground tile) ──────────
+            if (self.state.combat and self.state.combat.active
+                    and not self.y_held and not self.u_held):
+                ct_idx = self.state.combat.current_index
+                if ct_idx < len(self.state.combat.turn_queue):
+                    ct = self.state.combat.turn_queue[ct_idx]
+                    if ct.combatant_type == "npc" and ct.can_move:
+                        npc_cell = self.state.find_object_cell(ct.id)
+                        if npc_cell:
+                            nx, ny = npc_cell
+                            if (abs(gx - nx) + abs(gy - ny) == 1
+                                    and cell and cell.walkable
+                                    and not cell.occupant
+                                    and cell.tile_type == "ground"):
+                                self.send({"type": "DM_NPC_MOVE",
+                                           "npc_id": ct.id,
+                                           "target_cell": [gx, gy]})
+                                return
+
+            # ── Block most DM edits during active combat ─────────────────────
+            in_combat = bool(self.state.combat and self.state.combat.active)
+            if in_combat:
+                self._painting = False
+                return  # NPC movement (above) already handled; everything else blocked
+
+            # ── Guard: never paint over protected cells ───────────────────────
+            if cell and cell.protected and (self.y_held or self.u_held):
+                return
+
+            if self.y_held:
+                # Wall mode
+                self._painting = True
+                self._paint_type = "wall"
+                self._painted_cells = {(gx, gy)}
+                self._place_wall_at(gx, gy)
+                return
+
+            if self.u_held:
+                # Water mode — skip protected cells
+                if (cell and cell.protected) or (cell and cell.occupant):
+                    self._painting = False
+                    return
+                self._painting = True
+                self._paint_type = "water"
+                self._painted_cells = {(gx, gy)}
+                self.send({"type": "DM_TILE_SET",
+                           "cell": [gx, gy], "walkable": False, "tile_type": "water"})
+                return
+
+            if cell and cell.occupant:
+                # Wall occupant → clear it on click/drag (item 2)
+                if isinstance(cell.occupant, Wall):
+                    self._painting = True
+                    self._paint_type = "wall_clear"
+                    self._painted_cells = {(gx, gy)}
+                    self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
+                else:
+                    # Object drag (NPC, Item, Door)
+                    self._drag_source = (gx, gy)
+                    self._drag_obj = cell.occupant
+                    self._drag_mouse = (event.x, event.y)
+                    self._painting = False
+            else:
+                # Ground paint — skip protected cells
+                if cell and cell.protected:
+                    self._painting = False
+                    return
+                tile_type = cell.tile_type if cell else None
+                if cell is None or not cell.walkable or tile_type == "water":
+                    self._painting = True
+                    self._paint_type = "ground"
+                    self._painted_cells = {(gx, gy)}
+                    self.send({"type": "DM_TILE_SET",
+                               "cell": [gx, gy], "walkable": True, "tile_type": "ground"})
+                else:
+                    self._painting = False
         else:
             pc = self._player_cell()
             if pc:
@@ -489,25 +647,67 @@ class GameCanvas(tk.Canvas):
                 if abs(gx - px) + abs(gy - py) == 1:
                     self.send({"type": "PLAYER_MOVE", "target_cell": [gx, gy]})
 
-    def _on_right_click(self, event) -> None:
-        gx, gy = self._canvas_to_cell(event.x, event.y)
-        self.open_context("right_click", (gx, gy), (event.x_root, event.y_root))
-
-    def _on_drag_start(self, event) -> None:
-        if not self.is_dm:
-            return
-        gx, gy = self._canvas_to_cell(event.x, event.y)
+    def _place_wall_at(self, gx: int, gy: int) -> None:
         cell = self.state.grid.get((gx, gy))
         if cell and cell.occupant:
-            self._drag_source = (gx, gy)
-            self._drag_obj = cell.occupant
-            self._drag_mouse = (event.x, event.y)
+            return
+        # Ensure ground tile first
+        if cell is None or cell.tile_type != "ground":
+            self.send({"type": "DM_TILE_SET",
+                       "cell": [gx, gy], "walkable": True, "tile_type": "ground"})
+        import uuid as _uuid_mod
+        self.send({"type": "DM_SPAWN_OBJECT", "cell": [gx, gy],
+                   "object": {"type": "Wall", "id": str(_uuid_mod.uuid4())}})
 
     def _on_drag_move(self, event) -> None:
         if self._drag_obj:
             self._drag_mouse = (event.x, event.y)
+            return
+        if not (self._painting and self.is_dm):
+            return
+        gx, gy = self._canvas_to_cell(event.x, event.y)
+        if (gx, gy) in self._painted_cells:
+            return
+        cell = self.state.grid.get((gx, gy))
+        pt = self._paint_type
+
+        # Never paint over protected cells
+        if cell and cell.protected:
+            return
+
+        if pt == "wall_clear":
+            # Clear wall objects encountered while dragging
+            if cell and isinstance(cell.occupant, Wall):
+                self._painted_cells.add((gx, gy))
+                self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
+            return
+
+        if pt == "wall":
+            if cell and cell.occupant:
+                return
+            self._painted_cells.add((gx, gy))
+            self._place_wall_at(gx, gy)
+        elif pt == "water":
+            if cell and cell.occupant:
+                return
+            if cell is None or (cell.tile_type == "ground" and not cell.occupant):
+                self._painted_cells.add((gx, gy))
+                self.send({"type": "DM_TILE_SET",
+                           "cell": [gx, gy], "walkable": False, "tile_type": "water"})
+        else:  # ground
+            # Clear walls encountered during any ground-mode drag (item 5)
+            if cell and isinstance(cell.occupant, Wall):
+                self._painted_cells.add((gx, gy))
+                self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
+            elif cell is None or cell.tile_type == "water":
+                if cell is None or not cell.occupant:
+                    self._painted_cells.add((gx, gy))
+                    self.send({"type": "DM_TILE_SET",
+                               "cell": [gx, gy], "walkable": True, "tile_type": "ground"})
 
     def _on_drag_end(self, event) -> None:
+        self._painting = False
+        self._painted_cells = set()
         if not self._drag_obj or not self._drag_source:
             self._drag_obj = None
             self._drag_source = None
@@ -524,6 +724,53 @@ class GameCanvas(tk.Canvas):
         self._drag_source = None
         self._drag_mouse = None
 
+    # ── middle mouse (tile eraser) ────────────────────────────────────────────
+
+    def _on_middle_press(self, event) -> None:
+        if not self.is_dm:
+            return
+        if self.state.combat and self.state.combat.active:
+            return  # no tile deletion during combat
+        gx, gy = self._canvas_to_cell(event.x, event.y)
+        self._erasing = True
+        self._erased_cells = set()
+        self._try_erase(gx, gy)
+
+    def _on_middle_drag(self, event) -> None:
+        if not self._erasing or not self.is_dm:
+            return
+        gx, gy = self._canvas_to_cell(event.x, event.y)
+        if (gx, gy) not in self._erased_cells:
+            self._try_erase(gx, gy)
+
+    def _on_middle_release(self, event) -> None:
+        self._erasing = False
+        self._erased_cells = set()
+
+    def _try_erase(self, gx: int, gy: int) -> None:
+        cell = self.state.grid.get((gx, gy))
+        if not cell:
+            return   # nothing to erase
+        if cell.protected:
+            return
+        # Skip if a player is on this cell or within 1-tile radius
+        if self.state.players_at.get(f"{gx},{gy}"):
+            return
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                if self.state.players_at.get(f"{gx+dx},{gy+dy}"):
+                    return
+        self._erased_cells.add((gx, gy))
+        # Erase regardless of tile type (ground, water) or occupant
+        self.send({"type": "DM_TILE_SET", "cell": [gx, gy],
+                   "walkable": False, "tile_type": "ground"})
+
+    def _on_right_click(self, event) -> None:
+        gx, gy = self._canvas_to_cell(event.x, event.y)
+        self.open_context("right_click", (gx, gy), (event.x_root, event.y_root))
+
     def _on_scroll(self, event) -> None:
         mx, my = event.x, event.y
         wx = mx / self.zoom + self.offset_x
@@ -535,6 +782,15 @@ class GameCanvas(tk.Canvas):
         self.offset_y = wy - my / new_zoom
 
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    def center_on_origin_grid(self) -> None:
+        """Centre the viewport on the middle of the initial 4×4 grid block."""
+        w = self.winfo_width() or 1280
+        h = self.winfo_height() or 720
+        world_cx = 2 * BASE_CELL_PX
+        world_cy = 2 * BASE_CELL_PX
+        self.offset_x = world_cx - w / (2 * self.zoom)
+        self.offset_y = world_cy - h / (2 * self.zoom)
 
     def _player_cell(self) -> Optional[Tuple[int, int]]:
         for key, uuids in self.state.players_at.items():

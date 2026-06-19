@@ -38,6 +38,10 @@ class GameScreen(tk.Frame):
         self._player_list_overlay = None
         self._turn_panel = None
         self._esc_open = False
+        self._esc_panel = None
+        self._tab_panel = None
+        self._b_panel = None
+        self._c_panel = None
 
         # Smooth-pan state (DM only)
         self._pan_keys: set = set()
@@ -73,46 +77,57 @@ class GameScreen(tk.Frame):
         )
         self._canvas.pack(fill=tk.BOTH, expand=True)
 
+        host_uuid = self.server.host_uuid if self.server else self.local_uuid
         self._chat = ChatWidget(
             self._canvas,
             on_send=self._on_chat_send,
             is_dm=self.is_dm,
             game_state=self.state,
+            host_uuid=host_uuid,
         )
-        self._chat.place(x=0, rely=1.0, y=-ChatWidget.HEIGHT,
-                         width=ChatWidget.WIDTH, height=ChatWidget.HEIGHT)
+        CW = ChatWidget.WIDTH
+        CH = ChatWidget.HEIGHT
+        self._chat.place(x=0, rely=1.0, y=-CH, width=CW, height=CH)
 
         if self.is_dm:
-            # Two-row DM bar above chat
+            # Long Rest — full-width bar button
             self._dm_bar_top = tk.Frame(self._canvas, bg=PALETTE["card2"])
-            self._dm_bar_top.place(x=0, rely=1.0,
-                                   y=-(ChatWidget.HEIGHT + 62),
-                                   width=320, height=28)
-            flat_btn(self._dm_bar_top, "🌙 Long Rest",
-                     self._do_long_rest, style="ghost").pack(
-                side=tk.LEFT, padx=4, pady=2)
+            self._dm_bar_top.place(x=0, rely=1.0, y=-(CH + 60), width=CW, height=30)
+            self._long_rest_btn = flat_btn(
+                self._dm_bar_top, "🌙  Long Rest",
+                self._do_long_rest, style="rest")
+            self._long_rest_btn.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
 
+            # Combat — full-width bar button with encounter count on right
             self._combat_bar = tk.Frame(self._canvas, bg=PALETTE["card2"])
-            self._combat_bar.place(x=0, rely=1.0,
-                                   y=-(ChatWidget.HEIGHT + 32),
-                                   width=320, height=30)
-            self._combat_btn = flat_btn(
-                self._combat_bar, "⚔ Start Combat",
-                self._toggle_combat, style="ghost")
-            self._combat_btn.pack(side=tk.LEFT, padx=4, pady=2)
+            self._combat_bar.place(x=0, rely=1.0, y=-(CH + 30), width=CW, height=30)
             self._encounter_lbl = tk.Label(
                 self._combat_bar, text="0 in encounter",
-                bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
-                font=FONTS["small"])
-            self._encounter_lbl.pack(side=tk.LEFT, padx=6)
+                bg=PALETTE["fight"], fg="#ffaaaa",
+                font=FONTS["small"], padx=8)
+            self._encounter_lbl.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, pady=2)
+            self._combat_btn = flat_btn(
+                self._combat_bar, "⚔  Start Combat",
+                self._toggle_combat, style="fight")
+            self._combat_btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=2, padx=(4, 0))
+            # Make encounter label also trigger toggle
+            self._encounter_lbl.bind("<Button-1>", lambda e: self._toggle_combat())
 
-        self._canvas.center_on_cell(0, 0)
+        # Click on canvas unfocuses chat
+        self._canvas.bind("<Button-1>",
+                          lambda e: self._chat.blur_input(), add=True)
+        self._canvas.bind("<Button-3>",
+                          lambda e: self._chat.blur_input(), add=True)
+
+        if self.is_dm:
+            self._canvas.after(120, self._canvas.center_on_origin_grid)
+        else:
+            self._canvas.after(120, lambda: self._canvas.center_on_cell(0, 0))
         self._bind_keys()
         self._refresh_combat_ui()
 
     def _bind_keys(self) -> None:
         root = self.winfo_toplevel()
-        # Movement / pan — press and release for smooth DM pan; discrete for PC
         root.bind("<KeyPress>",   self._on_key_press)
         root.bind("<KeyRelease>", self._on_key_release)
         root.bind("<Escape>",     self._on_esc)
@@ -121,6 +136,19 @@ class GameScreen(tk.Frame):
         root.bind("<KeyPress-c>", self._on_c)
         root.bind("<Return>",     self._on_enter)
         root.bind("<space>",      self._on_space)
+        # Tile-type painting keys (DM only; canvas reads the flags)
+        root.bind("<KeyPress-u>",   lambda e: self._set_paint_key("u", True))
+        root.bind("<KeyRelease-u>", lambda e: self._set_paint_key("u", False))
+        root.bind("<KeyPress-y>",   lambda e: self._set_paint_key("y", True))
+        root.bind("<KeyRelease-y>", lambda e: self._set_paint_key("y", False))
+
+    def _set_paint_key(self, key: str, held: bool) -> None:
+        if not self.is_dm:
+            return
+        if key == "u":
+            self._canvas.u_held = held
+        elif key == "y":
+            self._canvas.y_held = held
 
     # ── smooth DM pan ─────────────────────────────────────────────────────────
 
@@ -298,11 +326,18 @@ class GameScreen(tk.Frame):
 
         if self.is_dm and hasattr(self, "_combat_btn"):
             if in_combat:
-                self._combat_btn.config(text="■ End Combat", bg=PALETTE["danger"])
+                btn_bg = PALETTE["danger"]
+                btn_txt = "■   End Combat "
+                enc_bg = PALETTE["danger"]
             else:
-                self._combat_btn.config(text="⚔ Start Combat", bg=PALETTE["card2"])
+                btn_bg = PALETTE["fight"]
+                btn_txt = "⚔  Start Combat"
+                enc_bg = PALETTE["fight"]
+            self._combat_btn.config(text=btn_txt, bg=btn_bg,
+                                    activebackground=btn_bg)
             n_enc = len((self.state.combat.encounter_npc_ids if self.state.combat else []))
-            self._encounter_lbl.config(text=f"{n_enc} in encounter")
+            self._encounter_lbl.config(text=f"{n_enc} in encounter",
+                                       bg=enc_bg)
 
         if self._turn_panel and self._turn_panel.winfo_exists():
             self._turn_panel.destroy()
@@ -354,34 +389,42 @@ class GameScreen(tk.Frame):
         if self._is_chat_focused():
             self._chat.blur_input()
             return
-        if self._esc_open:
+        if self._esc_panel and not self._esc_panel._closing:
+            self._esc_panel.close()
+            self._esc_panel = None
+            self._esc_open = False
             return
         self._open_esc_menu()
 
-    def _on_tab(self, event) -> None:
+    def _on_tab(self, event) -> str:
         if self._is_chat_focused():
-            return
-        if self._player_list_overlay and self._player_list_overlay.winfo_exists():
-            self._player_list_overlay.destroy()
-            self._player_list_overlay = None
-        else:
-            from dialogs.player_list_overlay import PlayerListOverlay
-            host_uuid = self.server.host_uuid if self.server else self.local_uuid
-            self._player_list_overlay = PlayerListOverlay(
-                self.winfo_toplevel(), self.state,
-                host_uuid=host_uuid,
-                local_uuid=self.local_uuid,
-                latencies=self._latencies,
-            )
+            return "break"
+        if self._tab_panel and not self._tab_panel._closing:
+            self._tab_panel.close()
+            self._tab_panel = None
+            return "break"
+        from dialogs.player_list_overlay import PlayerListOverlay
+        host_uuid = self.server.host_uuid if self.server else self.local_uuid
+        self._tab_panel = PlayerListOverlay(
+            self.winfo_toplevel(), self.state,
+            host_uuid=host_uuid,
+            local_uuid=self.local_uuid,
+            latencies=self._latencies,
+        )
+        return "break"
 
     def _on_b(self, event) -> None:
         if self._is_chat_focused():
+            return
+        if self._b_panel and not self._b_panel._closing:
+            self._b_panel.close()
+            self._b_panel = None
             return
         player = self.state.players.get(self.local_uuid)
         if not player:
             return
         from dialogs.inventory_dialog import InventoryDialog
-        InventoryDialog(
+        self._b_panel = InventoryDialog(
             self.winfo_toplevel(), player,
             on_use=lambda iid: self._send({"type": "ITEM_USE", "item_id": iid}),
             on_equip=lambda iid: self._send({"type": "ITEM_EQUIP", "item_id": iid}),
@@ -392,11 +435,15 @@ class GameScreen(tk.Frame):
     def _on_c(self, event) -> None:
         if self._is_chat_focused():
             return
+        if self._c_panel and not self._c_panel._closing:
+            self._c_panel.close()
+            self._c_panel = None
+            return
         player = self.state.players.get(self.local_uuid)
         if not player:
             return
         from dialogs.player_stats_dialog import PlayerStatsDialog
-        PlayerStatsDialog(
+        self._c_panel = PlayerStatsDialog(
             self.winfo_toplevel(), player,
             on_save_stats=lambda s: self._send({"type": "STATS_UPDATE", "stats": s}),
         )
@@ -511,17 +558,29 @@ class GameScreen(tk.Frame):
         if action is None:
             return
         action_range = action.get("Range", 1)
-        if action_range <= 1:
+        if action_range == 0:
+            # Self-target — use player's own cell
+            pc = self._canvas._player_cell()
+            if pc:
+                self._send({
+                    "type": "PLAYER_ACTION",
+                    "action_name": action_name,
+                    "item_id": item.id,
+                    "target_id": self.local_uuid,
+                    "target_cell": list(pc),
+                })
+            return
+        if action_range == 1:
             self._pc_do_action(npc, npc_x, npc_y, item, action_name)
             return
         pc = self._canvas._player_cell()
         if not pc:
             return
+        # All walkable cells in range are valid — empty cells cause a fizzle
         targets = cells_in_range(pc, action_range, self.state,
                                  self.state.settings.los_max_distance)
-        valid = {t for t in targets if isinstance(
-            self.state.grid.get(t, Cell()).occupant, NPC)}
-        self._canvas.set_combat_action({"item_id": item.id, "action_name": action_name}, valid)
+        self._canvas.set_combat_action({"item_id": item.id, "action_name": action_name},
+                                       targets)
 
     def _confirm_combat_action(self, tx, ty) -> None:
         action_info = self._canvas._combat_action
@@ -529,14 +588,15 @@ class GameScreen(tk.Frame):
             return
         cell = self.state.grid.get((tx, ty))
         target = cell.occupant if cell else None
-        if isinstance(target, NPC):
-            self._send({
-                "type": "PLAYER_ACTION",
-                "action_name": action_info.get("action_name", ""),
-                "item_id": action_info.get("item_id"),
-                "target_id": target.id,
-                "target_cell": [tx, ty],
-            })
+        # Send regardless of occupant — server handles fizzle on empty cell
+        target_id = target.id if target else ""
+        self._send({
+            "type": "PLAYER_ACTION",
+            "action_name": action_info.get("action_name", ""),
+            "item_id": action_info.get("item_id"),
+            "target_id": target_id,
+            "target_cell": [tx, ty],
+        })
         self._canvas.set_combat_action(None, set())
 
     def _pc_do_action(self, npc: NPC, gx, gy, item, action_name) -> None:
@@ -554,27 +614,107 @@ class GameScreen(tk.Frame):
 
     def _dm_right_click(self, gx, gy, grid_cell, screen_pos) -> None:
         sx, sy = screen_pos if screen_pos else (100, 100)
+        in_combat = bool(self.state.combat and self.state.combat.active)
+
+        # ── During combat: player-only sub-menu ──────────────────────────────
+        if in_combat:
+            uuids = self.state.players_at.get(f"{gx},{gy}", [])
+            if not uuids:
+                return
+            menu = tk.Menu(self.winfo_toplevel(), tearoff=0,
+                           bg=PALETTE["card"], fg=PALETTE["fg"])
+            for pid in uuids:
+                p = self.state.players.get(pid)
+                if not p:
+                    continue
+                p_menu = tk.Menu(menu, tearoff=0,
+                                 bg=PALETTE["card"], fg=PALETTE["fg"])
+                p_menu.add_command(label="Level Up",
+                                   command=lambda u=pid: self._send(
+                                       {"type": "DM_LEVEL_UP_PLAYER",
+                                        "player_uuid": u}))
+                p_menu.add_command(label="Modify Player",
+                                   command=lambda u=pid, pl=p:
+                                       self._dm_modify_player(u, pl))
+                p_menu.add_command(label="Options",
+                                   command=lambda u=pid, pl=p:
+                                       self._dm_player_options(u, pl))
+                menu.add_cascade(label=f"Player: {p.Name}", menu=p_menu)
+            menu.tk_popup(sx, sy)
+            return
+
+        # ── Normal DM right-click (out of combat) ─────────────────────────────
         menu = tk.Menu(self.winfo_toplevel(), tearoff=0,
                        bg=PALETTE["card"], fg=PALETTE["fg"])
 
-        if not grid_cell or not grid_cell.walkable:
-            menu.add_command(label="Create Tile",
-                             command=lambda: self._send(
-                                 {"type": "DM_TILE_SET", "cell": [gx, gy], "walkable": True}))
+        tile_type = grid_cell.tile_type if grid_cell else "none"
+
+        # Empty / water / non-walkable cell — minimal menu
+        if not grid_cell or tile_type == "water" or not grid_cell.walkable:
+            if not grid_cell:
+                menu.add_command(
+                    label="Create Ground Tile",
+                    command=lambda: self._send(
+                        {"type": "DM_TILE_SET", "cell": [gx, gy],
+                         "walkable": True, "tile_type": "ground"}))
+            if tile_type == "water":
+                menu.add_command(
+                    label="Convert to Ground",
+                    command=lambda: self._send(
+                        {"type": "DM_TILE_SET", "cell": [gx, gy],
+                         "walkable": True, "tile_type": "ground"}))
+                menu.add_command(
+                    label="Delete Water Tile",
+                    command=lambda: self._send(
+                        {"type": "DM_TILE_SET", "cell": [gx, gy],
+                         "walkable": False, "tile_type": "ground"}))
             menu.tk_popup(sx, sy)
             return
 
         obj = grid_cell.occupant
         uuids = self.state.players_at.get(f"{gx},{gy}", [])
+        is_protected = bool(grid_cell.protected)
 
         if obj:
-            menu.add_command(label="Modify Object",
-                             command=lambda: self._dm_modify_object(gx, gy, obj))
-            menu.add_command(label="Delete Object",
-                             command=lambda: self._send(
-                                 {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
-            if isinstance(obj, NPC):
-                if obj.id in self.state.combat.encounter_npc_ids:
+            from game.objects import Wall as _Wall, Door as _Door
+            if isinstance(obj, _Wall):
+                if not is_protected:
+                    menu.add_command(label="Delete Wall",
+                                     command=lambda: self._send(
+                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+            elif isinstance(obj, _Door):
+                # Door-specific toggles (item 3)
+                d = obj
+                menu.add_command(
+                    label="Close" if d.Open else "Open",
+                    command=lambda _d=d: self._send({
+                        "type": "DM_MODIFY_OBJECT", "cell": [gx, gy],
+                        "object": {**_d.to_dict(), "Open": not _d.Open}}))
+                menu.add_command(
+                    label="Fix" if d.Broken else "Break",
+                    command=lambda _d=d: self._send({
+                        "type": "DM_MODIFY_OBJECT", "cell": [gx, gy],
+                        "object": {**_d.to_dict(), "Broken": not _d.Broken}}))
+                menu.add_command(
+                    label="Unlock" if d.Locked else "Lock",
+                    command=lambda _d=d: self._send({
+                        "type": "DM_MODIFY_OBJECT", "cell": [gx, gy],
+                        "object": {**_d.to_dict(), "Locked": not _d.Locked}}))
+                if not is_protected:
+                    menu.add_separator()
+                    menu.add_command(label="Delete Door",
+                                     command=lambda: self._send(
+                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+            elif not is_protected:
+                menu.add_command(label="Modify Object",
+                                 command=lambda: self._dm_modify_object(gx, gy, obj))
+                menu.add_command(label="Delete Object",
+                                 command=lambda: self._send(
+                                     {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+
+            if isinstance(obj, NPC) and not is_protected:
+                enc_ids = self.state.combat.encounter_npc_ids if self.state.combat else []
+                if obj.id in enc_ids:
                     menu.add_command(
                         label="Remove From Encounter",
                         command=lambda: self._send(
@@ -584,16 +724,28 @@ class GameScreen(tk.Frame):
                         label="Add To Encounter",
                         command=lambda: self._send(
                             {"type": "DM_ADD_TO_ENCOUNTER", "npc_id": obj.id}))
-                npc_action_menu = tk.Menu(menu, tearoff=0, bg=PALETTE["card"], fg=PALETTE["fg"])
+                npc_action_menu = tk.Menu(menu, tearoff=0,
+                                          bg=PALETTE["card"], fg=PALETTE["fg"])
                 if obj.Actions:
                     for aname in obj.Actions:
                         npc_action_menu.add_command(
                             label=aname,
                             command=lambda a=aname: self._dm_npc_target_select(obj, a))
                 menu.add_cascade(label="Actions", menu=npc_action_menu)
-        else:
+
+        elif not is_protected:
+            # Unoccupied ground — spawn options (item 3: no Wall, add Door)
+            import uuid as _uuid_mod
             menu.add_command(label="Spawn Object",
                              command=lambda: self._dm_spawn(gx, gy))
+            menu.add_command(
+                label="Spawn Door",
+                command=lambda: self._send({
+                    "type": "DM_SPAWN_OBJECT", "cell": [gx, gy],
+                    "object": {"type": "Door", "id": str(_uuid_mod.uuid4()),
+                               "Open": False, "Broken": False, "Locked": False}
+                })
+            )
 
         if uuids:
             menu.add_separator()
@@ -601,25 +753,29 @@ class GameScreen(tk.Frame):
                 p = self.state.players.get(pid)
                 if not p:
                     continue
-                p_menu = tk.Menu(menu, tearoff=0, bg=PALETTE["card"], fg=PALETTE["fg"])
+                p_menu = tk.Menu(menu, tearoff=0,
+                                 bg=PALETTE["card"], fg=PALETTE["fg"])
                 p_menu.add_command(label="Level Up",
                                    command=lambda u=pid: self._send(
                                        {"type": "DM_LEVEL_UP_PLAYER", "player_uuid": u}))
                 p_menu.add_command(label="Modify Player",
-                                   command=lambda u=pid, pl=p: self._dm_modify_player(u, pl))
+                                   command=lambda u=pid, pl=p:
+                                       self._dm_modify_player(u, pl))
                 p_menu.add_command(label="Options",
-                                   command=lambda u=pid, pl=p: self._dm_player_options(u, pl))
+                                   command=lambda u=pid, pl=p:
+                                       self._dm_player_options(u, pl))
                 menu.add_cascade(label=f"Player: {p.Name}", menu=p_menu)
 
         if grid_cell.walkable:
-            if not grid_cell.protected:
+            if not is_protected:
                 menu.add_separator()
                 menu.add_command(label="Delete Tile",
                                  command=lambda: self._send(
-                                     {"type": "DM_TILE_SET", "cell": [gx, gy], "walkable": False}))
+                                     {"type": "DM_TILE_SET", "cell": [gx, gy],
+                                      "walkable": False}))
             if grid_cell.occupant is None:
                 menu.add_command(label="Warp Players Here",
-                                command=lambda: self._dm_warp(gx, gy))
+                                 command=lambda: self._dm_warp(gx, gy))
 
         menu.tk_popup(sx, sy)
 
@@ -735,9 +891,11 @@ class GameScreen(tk.Frame):
     def _open_esc_menu(self) -> None:
         self._esc_open = True
         panel = Panel(self, padx=28, pady=20)
+        self._esc_panel = panel
 
         def _close():
             self._esc_open = False
+            self._esc_panel = None
             panel.close()
 
         tk.Label(panel, text="Menu", bg=PALETTE["card"],

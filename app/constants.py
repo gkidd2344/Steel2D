@@ -10,6 +10,8 @@ PALETTE = {
     "bg":       "#0d0d14",
     "card":     "#16162a",
     "card2":    "#1e1e38",
+    "rest":     "#1B3A1B",
+    "fight":    "#3B1919",
     "border":   "#2e2e4a",
     "accent":   "#2f7ee0",
     "danger":   "#cc2222",
@@ -24,24 +26,31 @@ PALETTE = {
 }
 
 FONTS = {
-    "title":   ("Segoe UI", 24, "bold"),
-    "heading": ("Segoe UI", 16, "bold"),
-    "sub":     ("Segoe UI", 13, "bold"),
-    "body":    ("Segoe UI", 12),
-    "small":   ("Segoe UI", 10),
-    "mono":    ("Consolas", 11),
-    "chat":    ("Segoe UI", 11),
-    "icon":    ("Segoe UI", 18),
+    "title":      ("Segoe UI", 24, "bold"),
+    "heading":    ("Segoe UI", 16, "bold"),
+    "sub":        ("Segoe UI", 13, "bold"),
+    "body":       ("Segoe UI", 12),
+    "small":      ("Segoe UI", 10),
+    "mono":       ("Consolas", 11),
+    "chat":       ("Segoe UI", 11),
+    "icon":       ("Segoe UI", 18),
+    "form_label": ("Segoe UI", 12, "bold"),  # bold white labels in dialogs
 }
 
 TAG_COLOURS = {
-    "normal":      "#e6e6f0",
-    "yell":        "#cc6600",
-    "whisper_out": "#9090cc",
-    "whisper_in":  "#9090cc",
-    "system":      "#888888",
-    "error":       "#cc3333",
+    "normal":         "#e6e6f0",
+    "yell":           "#f07060",   # salmon
+    "whisper_out":    "#9090cc",
+    "whisper_in":     "#9090cc",
+    "system":         "#888888",
+    "error":          "#cc3333",
+    "combat_damage":  "#ff4444",   # red — damage numbers
+    "combat_heal":    "#44ff88",   # green — heal numbers
+    "combat_fizzle":  "#888888",   # grey — missed / fizzled
 }
+
+DM_CHAT_COLOR   = "#ff9500"   # orange for [DM] display in chat
+YELL_CHAT_COLOR = "#f07060"   # salmon for /y
 
 EQUIPMENT_SLOTS = {
     1: "Head",

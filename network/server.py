@@ -114,8 +114,33 @@ class GameServer:
         self._server = await asyncio.start_server(
             self._handle_client, "0.0.0.0", self.port
         )
+        asyncio.ensure_future(self._buff_tick_loop())
         async with self._server:
             await self._server.serve_forever()
+
+    async def _buff_tick_loop(self) -> None:
+        """Decrement buff durations every 60 s while out of combat."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if self.state.combat and self.state.combat.active:
+                    continue  # in combat: durations tick on turn-end instead
+                patches = []
+                for pid, player in list(self.state.players.items()):
+                    if not player.Buffs:
+                        continue
+                    expired = [k for k, b in list(player.Buffs.items())
+                                if b.get("Duration", 0) - 1.0 <= 0]
+                    for b in player.Buffs.values():
+                        b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
+                    for k in expired:
+                        del player.Buffs[k]
+                    patches.append({"op": "set_player", "path": pid,
+                                    "value": player.to_dict()})
+                if patches:
+                    await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+            except Exception:
+                pass
 
     async def _handle_client(self, reader, writer) -> None:
         conn = ClientConn(reader, writer)
@@ -264,6 +289,7 @@ class GameServer:
     # ── movement ──────────────────────────────────────────────────────────────
 
     async def _h_player_move(self, conn: ClientConn, msg: dict) -> None:
+        from game.state import MOVE_COST, TURN_THRESHOLD
         tc = msg.get("target_cell", [0, 0])
         tx, ty = int(tc[0]), int(tc[1])
         pid = conn.uuid
@@ -273,8 +299,8 @@ class GameServer:
             if ct is None or ct.id != pid:
                 await conn.send({"type": "CHAT_ERROR", "text": "It is not your turn."})
                 return
-            if ct.has_moved:
-                await conn.send({"type": "CHAT_ERROR", "text": "You have already moved this turn."})
+            if not ct.can_move:
+                await conn.send({"type": "CHAT_ERROR", "text": "No movement remaining this turn."})
                 return
 
         cell = self._player_cells.get(pid)
@@ -309,21 +335,28 @@ class GameServer:
              "value": self.state.players_at[new_key]},
         ]
 
+        auto_end = False
         if self.state.combat and self.state.combat.active:
             ct = self._current_turn()
             if ct and ct.id == pid:
-                ct.has_moved = True
+                from game.state import MOVE_COST, TURN_THRESHOLD
+                ct.points_spent += MOVE_COST
                 patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": pid,
-                                       "has_moved": ct.has_moved,
-                                       "has_acted": ct.has_acted})
+                                       "has_acted": ct.has_acted,
+                                       "points_spent": ct.points_spent})
+                if ct.points_spent >= TURN_THRESHOLD:
+                    auto_end = True
 
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+        if auto_end:
+            await self._do_advance_turn()
 
     # ── player action (combat/interaction) ────────────────────────────────────
 
     async def _h_player_action(self, conn: ClientConn, msg: dict) -> None:
+        from game.state import ACTION_COST, TURN_THRESHOLD
         pid = conn.uuid
         player = self.state.players.get(pid)
         if not player:
@@ -340,35 +373,35 @@ class GameServer:
             if ct is None or ct.id != pid:
                 await conn.send({"type": "CHAT_ERROR", "text": "It is not your turn."})
                 return
-            if ct.has_acted:
-                await conn.send({"type": "CHAT_ERROR", "text": "You have already acted this turn."})
+            if not ct.can_act:
+                await conn.send({"type": "CHAT_ERROR", "text": "No action remaining this turn."})
                 return
 
+        # Resolve target — allow None (fizzle on empty cell)
         target_cell = self.state.grid.get((tx, ty))
-        if not target_cell:
-            return
-        target = target_cell.occupant if target_cell.occupant else None
+        target = None
+        if target_cell:
+            target = target_cell.occupant if target_cell.occupant else None
         if target_id:
-            if isinstance(target, NPC) and target.id == target_id:
+            # Self-targeting (target_id == own uuid)
+            if target_id == pid:
+                target = player
+            elif isinstance(target, NPC) and target.id == target_id:
                 pass
             else:
-                target_player = self.state.players.get(target_id)
-                if target_player:
-                    target = target_player
-                else:
-                    return
+                tp = self.state.players.get(target_id)
+                if tp:
+                    target = tp
 
         scalars = None
         action = None
-        used_item = None
         if item_id:
             item = next((i for i in player.Equipment.values() if i.id == item_id), None)
             if item and item.Actions:
                 action = item.Actions.get(action_name)
                 scalars = item.Scalars
-                used_item = item
 
-        # Validate Casts before applying
+        # Validate Casts charge
         if action and action.get("Casts"):
             casts = action["Casts"]
             if casts.get("remaining", 0) <= 0:
@@ -376,33 +409,64 @@ class GameServer:
                                  "text": f"{action_name} has no uses remaining."})
                 return
             casts["remaining"] = max(0, casts["remaining"] - 1)
-            patches_cast = [{"op": "set_player", "path": pid,
-                              "value": player.to_dict()}]
-            await self._broadcast({"type": "STATE_PATCH", "patches": patches_cast})
+            await self._broadcast({"type": "STATE_PATCH",
+                                   "patches": [{"op": "set_player", "path": pid,
+                                                "value": player.to_dict()}]})
 
-        total = apply_action(player, scalars, action, target, self.state.settings)
-        await self._apply_damage(target, total, (tx, ty))
+        if target is None:
+            # Fizzle — action fires at empty cell
+            await self._broadcast_combat_chat(
+                f"{player.Name} uses {action_name or 'Attack'} — but nothing is there!",
+                "combat_fizzle")
+        else:
+            total = apply_action(player, scalars, action, target, self.state.settings)
+            await self._apply_damage_and_buffs(
+                attacker=player, target=target, total=total,
+                action=action, cell=(tx, ty),
+                attacker_name=player.Name, action_name=action_name or "Attack")
 
+        auto_end = False
         if self.state.combat and self.state.combat.active:
             ct = self._current_turn()
             if ct and ct.id == pid:
                 ct.has_acted = True
+                ct.points_spent += ACTION_COST
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": pid,
-                                       "has_moved": ct.has_moved,
-                                       "has_acted": ct.has_acted})
+                                       "has_acted": ct.has_acted,
+                                       "points_spent": ct.points_spent})
+                if ct.points_spent >= TURN_THRESHOLD:
+                    auto_end = True
+        if auto_end:
+            await self._do_advance_turn()
 
-    async def _apply_damage(self, target, total: int, cell: Tuple[int, int]) -> None:
+    async def _apply_damage_and_buffs(self, attacker, target, total: int,
+                                       action: dict, cell: Tuple[int, int],
+                                       attacker_name: str = "", action_name: str = "") -> None:
+        """Apply damage/heal to target, then apply GivesBuff if action specifies."""
         patches = []
-        if target is None:
-            return
-        cx, cy = cell
+        target_name = getattr(target, "Name", "?")
 
-        if total >= 0:
+        if total > 0:
             target.CurrentHP = max(0, target.CurrentHP - total)
-        else:
+            await self._broadcast_combat_chat(
+                f"{attacker_name} deals {total} damage to {target_name} with {action_name}.",
+                "combat_damage")
+        elif total < 0:
             target.CurrentHP = min(target.MaximumHP, target.CurrentHP + abs(total))
+            await self._broadcast_combat_chat(
+                f"{attacker_name} heals {target_name} for {abs(total)} HP with {action_name}.",
+                "combat_heal")
 
+        # Apply GivesBuff
+        if action and action.get("GivesBuff"):
+            buff_name = action.get("BuffName", "")
+            buff_val = action.get("BuffValue", 0)
+            buff_dur = float(action.get("BuffDuration", 0))
+            if buff_name:
+                await self._apply_buff(target, buff_name, buff_val, buff_dur, patches)
+
+        cx, cy = cell
         if isinstance(target, NPC):
             if total >= 0 and target.CurrentHP <= 0:
                 if (cx, cy) in self.state.grid:
@@ -425,6 +489,92 @@ class GameServer:
             patches.append({"op": "set_player", "path": target.id, "value": target.to_dict()})
 
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+
+    # kept as thin wrapper for legacy code paths
+    async def _apply_damage(self, target, total: int, cell: Tuple[int, int]) -> None:
+        if target is None:
+            return
+        await self._apply_damage_and_buffs(target, target, total, None, cell)
+
+    async def _apply_buff(self, entity, buff_name: str, value: int,
+                          duration: float, patches: list) -> None:
+        """Apply a buff entry to entity. Handles Dispell and Agility."""
+        buffs = getattr(entity, "Buffs", None)
+        if buffs is None:
+            return
+
+        if buff_name == "Dispell" or (value == 0 and duration == 0):
+            if buff_name == "Dispell":
+                entity.Buffs.clear()
+            else:
+                entity.Buffs.pop(buff_name, None)
+        else:
+            entity.Buffs[buff_name] = {"Value": value, "Duration": duration}
+            # Agility during combat: add extra turn slots for players AND NPCs
+            if buff_name == "Agility" and self.state.combat and self.state.combat.active:
+                entity_type = "player" if isinstance(entity, PlayerObject) else "npc"
+                for _ in range(value):
+                    from game.combat import roll_initiative
+                    init = roll_initiative(entity)
+                    from game.state import CombatTurn
+                    new_turn = CombatTurn(combatant_type=entity_type,
+                                          id=entity.id,
+                                          name=entity.Name,
+                                          initiative=init)
+                    ins = self.state.combat.current_index + 1
+                    self.state.combat.turn_queue.insert(ins, new_turn)
+                patches.append({"op": "set_combat",
+                                "value": self.state.combat.to_dict()})
+
+    async def _broadcast_combat_chat(self, text: str, msg_type: str = "system") -> None:
+        await self._broadcast({"type": "CHAT_RECV", "message": {
+            "sender_uuid": "SYSTEM", "sender_alias": "Combat",
+            "content": text, "msg_type": msg_type,
+            "recipient_uuid": None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }})
+
+    async def _process_turn_end_buffs(self, entity_id: str,
+                                      entity_type: str) -> None:
+        """Apply DoT (Poison/Burn) and tick Duration at end of turn."""
+        if entity_type == "player":
+            entity = self.state.players.get(entity_id)
+        else:
+            cell = self.state.find_object_cell(entity_id)
+            entity = self.state.grid[cell].occupant if cell else None
+        if entity is None:
+            return
+
+        buffs = getattr(entity, "Buffs", {})
+        patches = []
+        dot = 0
+        if "Poison" in buffs:
+            dot += buffs["Poison"].get("Value", 1)
+        if "Burn" in buffs:
+            dot += buffs["Burn"].get("Value", 1)
+        if dot > 0:
+            entity.CurrentHP = max(0, entity.CurrentHP - dot)
+            await self._broadcast_combat_chat(
+                f"{getattr(entity,'Name','?')} takes {dot} damage from status effects.",
+                "combat_damage")
+
+        # Tick durations (1 min per turn-end during combat)
+        expired = [k for k, b in list(buffs.items())
+                   if b.get("Duration", 0) - 1 <= 0]
+        for k, b in list(buffs.items()):
+            b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
+        for k in expired:
+            del buffs[k]
+
+        if entity_type == "player":
+            patches.append({"op": "set_player", "path": entity_id,
+                             "value": entity.to_dict()})
+        else:
+            cx, cy = cell
+            patches.append({"op": "set_cell", "path": f"{cx},{cy}",
+                             "value": self.state.grid[cell].to_dict()})
+        if patches:
+            await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
     # ── chat ──────────────────────────────────────────────────────────────────
 
@@ -624,6 +774,7 @@ class GameServer:
         ct = self._current_turn()
         if ct is None or ct.id != pid:
             return
+        await self._process_turn_end_buffs(pid, "player")
         await self._do_advance_turn()
 
     async def _do_advance_turn(self) -> None:
@@ -663,9 +814,16 @@ class GameServer:
         cc = msg.get("cell", [0, 0])
         cx, cy = int(cc[0]), int(cc[1])
         walkable = bool(msg.get("walkable", True))
+        tile_type = msg.get("tile_type", "ground")
         key = (cx, cy)
+        existing = self.state.grid.get(key)
 
-        if not walkable:
+        # Never modify protected cells (initial 4×4 spawn area)
+        if existing and existing.protected:
+            return
+
+        if not walkable and tile_type != "water":
+            # Delete tile (middle-click erase)
             cell = self.state.grid.get(key)
             if cell and cell.protected:
                 return
@@ -673,10 +831,13 @@ class GameServer:
                 del self.state.grid[key]
             patches = [{"op": "del_cell", "path": f"{cx},{cy}"}]
         else:
+            is_walkable = (tile_type == "ground")
             if key not in self.state.grid:
-                self.state.grid[key] = Cell(walkable=True)
+                self.state.grid[key] = Cell(walkable=is_walkable, tile_type=tile_type)
             else:
-                self.state.grid[key].walkable = True
+                existing = self.state.grid[key]
+                existing.walkable = is_walkable
+                existing.tile_type = tile_type
             patches = [{"op": "set_cell", "path": f"{cx},{cy}",
                         "value": self.state.grid[key].to_dict()}]
 
@@ -689,6 +850,9 @@ class GameServer:
         cx, cy = int(cc[0]), int(cc[1])
         cell = self.state.grid.get((cx, cy))
         if not cell or not cell.walkable:
+            return
+        # Protected cells (initial 4×4) cannot have objects spawned in them
+        if cell.protected:
             return
         obj_d = msg.get("object", {})
         obj_d["id"] = str(uuid.uuid4())
@@ -983,16 +1147,23 @@ class GameServer:
             {"op": "set_cell", "path": f"{tx},{ty}",
              "value": self.state.grid[(tx, ty)].to_dict()},
         ]
+        auto_end = False
         if self.state.combat and self.state.combat.active:
             ct = self._current_turn()
             if ct and ct.id == npc_id:
-                ct.has_moved = True
+                from game.state import MOVE_COST, TURN_THRESHOLD
+                ct.points_spent += MOVE_COST
                 patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": npc_id,
-                                       "has_moved": True,
-                                       "has_acted": ct.has_acted})
+                                       "has_acted": ct.has_acted,
+                                       "points_spent": ct.points_spent})
+                if ct.points_spent >= TURN_THRESHOLD:
+                    auto_end = True
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+        if auto_end:
+            await self._process_turn_end_buffs(npc_id, "npc")
+            await self._do_advance_turn()
 
     async def _h_dm_npc_action(self, conn: ClientConn, msg: dict) -> None:
         if not conn.is_host:
@@ -1016,11 +1187,8 @@ class GameServer:
             target = target_player
         else:
             tc_cell = self.state.grid.get((tx, ty))
-            if tc_cell and isinstance(tc_cell.occupant, NPC):
+            if tc_cell and tc_cell.occupant:
                 target = tc_cell.occupant
-
-        if target is None:
-            return
 
         if action_name == "Default Attack" or not (npc.Actions and action_name in npc.Actions):
             scalars, action = None, None
@@ -1028,17 +1196,33 @@ class GameServer:
             scalars = npc.Scalars
             action = npc.Actions[action_name]
 
-        total = apply_action(npc, scalars, action, target, self.state.settings)
-        await self._apply_damage(target, total, (tx, ty))
+        if target is None:
+            await self._broadcast_combat_chat(
+                f"{npc.Name} uses {action_name} — but nothing is there!",
+                "combat_fizzle")
+        else:
+            total = apply_action(npc, scalars, action, target, self.state.settings)
+            await self._apply_damage_and_buffs(
+                attacker=npc, target=target, total=total,
+                action=action, cell=(tx, ty),
+                attacker_name=npc.Name, action_name=action_name)
 
+        auto_end = False
         if self.state.combat and self.state.combat.active:
             ct = self._current_turn()
             if ct and ct.id == npc_id:
+                from game.state import ACTION_COST, TURN_THRESHOLD
                 ct.has_acted = True
+                ct.points_spent += ACTION_COST
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": npc_id,
-                                       "has_moved": ct.has_moved,
-                                       "has_acted": True})
+                                       "has_acted": True,
+                                       "points_spent": ct.points_spent})
+                if ct.points_spent >= TURN_THRESHOLD:
+                    auto_end = True
+        if auto_end:
+            await self._process_turn_end_buffs(npc_id, "npc")
+            await self._do_advance_turn()
 
     async def _h_dm_npc_end_turn(self, conn: ClientConn, msg: dict) -> None:
         if not conn.is_host:
@@ -1049,6 +1233,7 @@ class GameServer:
         ct = self._current_turn()
         if ct is None or ct.id != npc_id:
             return
+        await self._process_turn_end_buffs(npc_id, "npc")
         await self._do_advance_turn()
 
     async def _h_dm_chat_as_npc(self, conn: ClientConn, msg: dict) -> None:
@@ -1178,21 +1363,46 @@ class GameServer:
                 used_hues.append(h)
             except Exception:
                 pass
-        reserved = list(RESERVED_HUES)
+
+        # Reserved hues: NPC red, NPC green, Item orange, door brown,
+        # yell salmon, DM orange, whisper blue/purple, gray/white/black
+        reserved = [
+            0.000,  # red (NPC hostile)
+            0.030,  # salmon/yell
+            0.080,  # orange (DM chat, Item)
+            0.110,  # orange-yellow
+            0.167,  # yellow
+            0.333,  # green (NPC friendly)
+            0.050,  # red-orange (door-ish)
+            0.600,  # cyan-blue area
+            0.650,  # blue (whisper)
+            0.700,  # blue-purple
+            0.750,  # purple
+            0.800,  # purple-magenta
+        ]
         all_blocked = reserved + used_hues
-        best_h = 0.0
+        exclusion = 0.10  # wider exclusion radius
+
+        best_h = None
         best_dist = -1.0
-        for candidate_h in [i / 36 for i in range(36)]:
+        for i in range(72):  # 5-degree steps
+            candidate_h = i / 72
             min_dist = min(
                 min(abs(candidate_h - h), 1.0 - abs(candidate_h - h))
                 for h in all_blocked
             ) if all_blocked else 1.0
-            if min_dist < HUE_EXCLUSION_RADIUS:
+            if min_dist < exclusion:
                 continue
             if min_dist > best_dist:
                 best_dist = min_dist
                 best_h = candidate_h
-        r, g, b = colorsys.hsv_to_rgb(best_h, 0.75, 0.85)
+
+        if best_h is None:
+            # Fallback: use deterministic hue from UUID
+            best_h = (sum(ord(c) for c in player_uuid) % 360) / 360.0
+
+        # Full brightness, high saturation — never dark or washed out
+        r, g, b = colorsys.hsv_to_rgb(best_h, 0.85, 1.0)
         return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
 
     def _bfs_drop_cell(self, origin: Tuple[int, int]) -> Optional[Tuple[int, int]]:

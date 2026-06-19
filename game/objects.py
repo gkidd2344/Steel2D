@@ -20,6 +20,8 @@ class NPC:
     Stats: Dict[str, int] = field(default_factory=lambda: {k: 0 for k in STAT_KEYS})
     Scalars: Optional[Dict[str, str]] = None
     Actions: Optional[Dict[str, dict]] = None
+    TurnsAllowed: int = 1
+    Buffs: Dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +37,8 @@ class NPC:
             "Stats": dict(self.Stats),
             "Scalars": self.Scalars,
             "Actions": self.Actions,
+            "TurnsAllowed": self.TurnsAllowed,
+            "Buffs": self.Buffs,
         }
 
     @classmethod
@@ -52,6 +56,8 @@ class NPC:
             Stats=d.get("Stats", {k: 0 for k in STAT_KEYS}),
             Scalars=d.get("Scalars"),
             Actions=d.get("Actions"),
+            TurnsAllowed=max(1, int(d.get("TurnsAllowed", 1))),
+            Buffs=d.get("Buffs", {}),
         )
 
 
@@ -146,6 +152,9 @@ class PlayerObject:
     Equipment: Dict[int, "Item"] = field(default_factory=dict)
     Inventory: List["Item"] = field(default_factory=list)
     avatar_png: Optional[bytes] = None
+    # Buffs: key → {"Value": int, "Duration": float (minutes)}
+    # Special keys: stat names, "Agility", "Poison", "Burn", "Dispell"
+    Buffs: Dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -161,6 +170,7 @@ class PlayerObject:
             "Equipment": {str(k): v.to_dict() for k, v in self.Equipment.items()},
             "Inventory": [item.to_dict() for item in self.Inventory],
             "avatar_png": base64.b64encode(self.avatar_png).decode() if self.avatar_png else None,
+            "Buffs": self.Buffs,
         }
 
     @classmethod
@@ -182,7 +192,21 @@ class PlayerObject:
             Equipment=equipment,
             Inventory=inventory,
             avatar_png=avatar_png,
+            Buffs=d.get("Buffs", {}),
         )
+
+
+@dataclass
+class Wall:
+    id: str
+    type: str = "Wall"
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "type": self.type}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Wall":
+        return cls(id=d["id"], type=d.get("type", "Wall"))
 
 
 def occupant_from_dict(d: Optional[dict]):
@@ -195,4 +219,6 @@ def occupant_from_dict(d: Optional[dict]):
         return Item.from_dict(d)
     if t == "Door":
         return Door.from_dict(d)
+    if t == "Wall":
+        return Wall.from_dict(d)
     return None
