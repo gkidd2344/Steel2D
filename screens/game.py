@@ -1151,9 +1151,10 @@ class GameScreen(tk.Frame):
             self.client.send(msg)
 
     def _is_chat_focused(self) -> bool:
+        """Return True if any text-input widget has keyboard focus."""
         try:
             focused = self.winfo_toplevel().focus_get()
-            return isinstance(focused, tk.Entry) and focused == self._chat._entry
+            return isinstance(focused, (tk.Entry, tk.Text))
         except Exception:
             return False
 
