@@ -1,4 +1,5 @@
 import tkinter as tk
+from typing import Callable, Optional
 from app.constants import PALETTE, FONTS
 
 
@@ -68,6 +69,53 @@ def card_frame(parent, **kwargs) -> tk.Frame:
     opts = dict(bg=PALETTE["card"], padx=20, pady=20)
     opts.update(kwargs)
     return tk.Frame(parent, **opts)
+
+
+def styled_check(parent, text: str, variable: tk.BooleanVar,
+                 command: Optional[Callable] = None,
+                 bg: str = None, **kwargs) -> tk.Frame:
+    """
+    Custom checkbutton with a visible white ✓ on accent background when
+    checked — looks correct on dark themes where OS-native checkmarks are
+    invisible.
+    """
+    frame_bg = bg or parent.cget("bg")
+    frame = tk.Frame(parent, bg=frame_bg, cursor="hand2")
+
+    indicator = tk.Label(
+        frame, width=2,
+        bg=PALETTE["card2"], fg="#ffffff",
+        font=FONTS["body"], relief=tk.FLAT,
+        highlightthickness=1,
+        highlightbackground=PALETTE["border"],
+    )
+    indicator.pack(side=tk.LEFT)
+
+    if text:
+        lbl = tk.Label(frame, text=text, bg=frame_bg,
+                       fg=PALETTE["fg"], font=FONTS["body"])
+        lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+    def _update(*_) -> None:
+        checked = variable.get()
+        indicator.config(
+            text="✓" if checked else " ",
+            bg=PALETTE["accent"] if checked else PALETTE["card2"],
+        )
+
+    def _toggle(e=None) -> None:
+        variable.set(not variable.get())
+        if command:
+            frame.after_idle(command)
+
+    indicator.bind("<Button-1>", _toggle)
+    frame.bind("<Button-1>", lambda e: _toggle())
+    for child in frame.winfo_children():
+        child.bind("<Button-1>", lambda e: _toggle())
+
+    variable.trace_add("write", _update)
+    _update()
+    return frame
 
 
 def _darken(hex_color: str, factor: float) -> str:

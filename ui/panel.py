@@ -1,16 +1,16 @@
 """
-In-app modal panel — replaces tk.Toplevel throughout the project.
+In-app floating panel — replaces tk.Toplevel throughout the project.
+Panels appear on the right side of the root window so they don't
+obscure the game canvas. They have no full-screen dark backdrop.
 
 Usage:
     class MyDialog(Panel):
         def __init__(self, parent, ...):
             super().__init__(parent)
-            tk.Label(self, text="Hello", ...).pack()
-            flat_btn(self, "OK", self.close, ...).pack()
+            tk.Label(self, text="Hello").pack()
+            flat_btn(self, "OK", self.close).pack()
 
-    MyDialog(some_widget)
-
-For synchronous confirm dialogs use Panel.wait():
+For synchronous confirm dialogs:
     panel = MyDialog(parent)
     panel.wait()   # blocks until self.close() is called
 """
@@ -24,17 +24,21 @@ class Panel(tk.Frame):
     def __init__(self, parent, padx: int = 0, pady: int = 0, **kwargs):
         root = parent.winfo_toplevel()
 
-        # Dark backdrop covers entire root window
-        self._backdrop = tk.Frame(root, bg="#000000")
-        self._backdrop.place(x=0, y=0, relwidth=1, relheight=1)
-        self._backdrop.lift()
+        # Remove keys Panel shouldn't forward to Frame
+        kwargs.pop("bg", None)
 
-        # Bind click on bare backdrop to do nothing (swallow events)
-        self._backdrop.bind("<Button-1>", lambda e: None)
+        super().__init__(
+            root,
+            bg=PALETTE["card"],
+            padx=padx,
+            pady=pady,
+            highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            **kwargs,
+        )
 
-        super().__init__(self._backdrop, bg=PALETTE["card"],
-                         padx=padx, pady=pady, **kwargs)
-        self.place(relx=0.5, rely=0.5, anchor="center")
+        # Float on the right side, vertically centred
+        self.place(relx=1.0, x=-10, rely=0.5, anchor="e")
         self.lift()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -44,7 +48,7 @@ class Panel(tk.Frame):
             return
         self._closing = True
         try:
-            self._backdrop.destroy()
+            tk.Frame.destroy(self)
         except Exception:
             pass
 
@@ -52,9 +56,9 @@ class Panel(tk.Frame):
         self.close()
 
     def wait(self) -> None:
-        """Block until close() is called (for synchronous dialogs)."""
+        """Block the event loop until close() is called."""
         try:
-            self.winfo_toplevel().wait_window(self._backdrop)
+            self.winfo_toplevel().wait_window(self)
         except Exception:
             pass
 

@@ -13,8 +13,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Steel2D")
-        self.geometry("900x650")
-        self.minsize(700, 500)
+        self.geometry("1280x720")
+        self.minsize(900, 600)
         self.configure(bg=PALETTE["bg"])
         self._user_config = load_user_config()
         self._current_screen = None

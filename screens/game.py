@@ -83,9 +83,19 @@ class GameScreen(tk.Frame):
                          width=ChatWidget.WIDTH, height=ChatWidget.HEIGHT)
 
         if self.is_dm:
+            # Two-row DM bar above chat
+            self._dm_bar_top = tk.Frame(self._canvas, bg=PALETTE["card2"])
+            self._dm_bar_top.place(x=0, rely=1.0,
+                                   y=-(ChatWidget.HEIGHT + 62),
+                                   width=320, height=28)
+            flat_btn(self._dm_bar_top, "🌙 Long Rest",
+                     self._do_long_rest, style="ghost").pack(
+                side=tk.LEFT, padx=4, pady=2)
+
             self._combat_bar = tk.Frame(self._canvas, bg=PALETTE["card2"])
-            self._combat_bar.place(x=0, rely=1.0, y=-(ChatWidget.HEIGHT + 32),
-                                   width=300, height=30)
+            self._combat_bar.place(x=0, rely=1.0,
+                                   y=-(ChatWidget.HEIGHT + 32),
+                                   width=320, height=30)
             self._combat_btn = flat_btn(
                 self._combat_bar, "⚔ Start Combat",
                 self._toggle_combat, style="ghost")
@@ -327,6 +337,9 @@ class GameScreen(tk.Frame):
         else:
             self._send({"type": "DM_START_COMBAT"})
 
+    def _do_long_rest(self) -> None:
+        self._send({"type": "DM_LONG_REST"})
+
     def _current_turn(self):
         if not (self.state.combat and self.state.combat.turn_queue):
             return None
@@ -469,9 +482,19 @@ class GameScreen(tk.Frame):
             )
             for slot_item in player.Equipment.values():
                 if slot_item.Actions:
-                    for act_name in slot_item.Actions:
+                    for act_name, action_def in slot_item.Actions.items():
+                        casts = action_def.get("Casts") if action_def else None
+                        if casts:
+                            remaining = casts.get("remaining", 0)
+                            mx = casts.get("max_per_rest", 0)
+                            label = f"{act_name} ({slot_item.Name})  [{remaining}/{mx}]"
+                            exhausted = remaining <= 0
+                        else:
+                            label = f"{act_name} ({slot_item.Name})"
+                            exhausted = False
                         action_menu.add_command(
-                            label=f"{act_name} ({slot_item.Name})",
+                            label=label,
+                            state=tk.DISABLED if exhausted else tk.NORMAL,
                             command=lambda i=slot_item, a=act_name, nx=gx, ny=gy: (
                                 self._start_action_targeting(i, a, nx, ny, npc)
                             ),

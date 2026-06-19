@@ -113,30 +113,33 @@ class GameCanvas(tk.Canvas):
     # ── render loop ───────────────────────────────────────────────────────────
 
     def _redraw(self) -> None:
-        self.delete("all")
-        self._anim_frame = (self._anim_frame + 1) % 60
-        now = time.time()
-        self.bubbles = [b for b in self.bubbles if now - b["born_at"] < 3.0]
+        try:
+            self.delete("all")
+            self._anim_frame = (self._anim_frame + 1) % 60
+            now = time.time()
+            self.bubbles = [b for b in self.bubbles if now - b["born_at"] < 3.0]
 
-        w = self.winfo_width() or 800
-        h = self.winfo_height() or 600
-        cell_px = BASE_CELL_PX * self.zoom
+            w = self.winfo_width() or 800
+            h = self.winfo_height() or 600
+            cell_px = BASE_CELL_PX * self.zoom
 
-        min_cx = int(self.offset_x / BASE_CELL_PX) - 1
-        max_cx = int((self.offset_x + w / self.zoom) / BASE_CELL_PX) + 2
-        min_cy = int(self.offset_y / BASE_CELL_PX) - 1
-        max_cy = int((self.offset_y + h / self.zoom) / BASE_CELL_PX) + 2
+            min_cx = int(self.offset_x / BASE_CELL_PX) - 1
+            max_cx = int((self.offset_x + w / self.zoom) / BASE_CELL_PX) + 2
+            min_cy = int(self.offset_y / BASE_CELL_PX) - 1
+            max_cy = int((self.offset_y + h / self.zoom) / BASE_CELL_PX) + 2
 
-        self._draw_grid(w, h, cell_px)
-        self._draw_tiles(min_cx, max_cx, min_cy, max_cy, cell_px)
-        self._draw_combat_highlights(cell_px)
-        self._draw_objects(min_cx, max_cx, min_cy, max_cy, cell_px)
-        self._draw_players(cell_px)
-        self._draw_bubbles(cell_px)
-        self._draw_drag_ghost(cell_px)
-        self._draw_tooltip(cell_px)
-
-        self.after(16, self._redraw)
+            self._draw_grid(w, h, cell_px)
+            self._draw_tiles(min_cx, max_cx, min_cy, max_cy, cell_px)
+            self._draw_combat_highlights(cell_px)
+            self._draw_objects(min_cx, max_cx, min_cy, max_cy, cell_px)
+            self._draw_players(cell_px)
+            self._draw_bubbles(cell_px)
+            self._draw_drag_ghost(cell_px)
+            self._draw_tooltip(cell_px)
+        except Exception:
+            pass
+        finally:
+            self.after(16, self._redraw)
 
     def _world_to_canvas(self, wx: float, wy: float) -> Tuple[float, float]:
         return (wx - self.offset_x) * self.zoom, (wy - self.offset_y) * self.zoom
@@ -277,7 +280,7 @@ class GameCanvas(tk.Canvas):
         pad = 2
         if door.Open:
             self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
-                                  fill="", outline="#8b4513", width=2)
+                                  fill="", outline="#8b4513", width=7)
         else:
             self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
                                   fill="#8b4513", outline="#5c2d0a", width=2)

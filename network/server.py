@@ -255,6 +255,7 @@ class GameServer:
             "DM_NPC_ACTION": self._h_dm_npc_action,
             "DM_NPC_END_TURN": self._h_dm_npc_end_turn,
             "DM_CHAT_AS_NPC": self._h_dm_chat_as_npc,
+            "DM_LONG_REST": self._h_dm_long_rest,
         }
         h = handlers.get(t)
         if h:
@@ -359,11 +360,25 @@ class GameServer:
 
         scalars = None
         action = None
+        used_item = None
         if item_id:
             item = next((i for i in player.Equipment.values() if i.id == item_id), None)
             if item and item.Actions:
                 action = item.Actions.get(action_name)
                 scalars = item.Scalars
+                used_item = item
+
+        # Validate Casts before applying
+        if action and action.get("Casts"):
+            casts = action["Casts"]
+            if casts.get("remaining", 0) <= 0:
+                await conn.send({"type": "CHAT_ERROR",
+                                 "text": f"{action_name} has no uses remaining."})
+                return
+            casts["remaining"] = max(0, casts["remaining"] - 1)
+            patches_cast = [{"op": "set_player", "path": pid,
+                              "value": player.to_dict()}]
+            await self._broadcast({"type": "STATE_PATCH", "patches": patches_cast})
 
         total = apply_action(player, scalars, action, target, self.state.settings)
         await self._apply_damage(target, total, (tx, ty))
@@ -1073,6 +1088,45 @@ class GameServer:
         else:
             self.state.chat_history.append(chat_msg)
             await self._broadcast({"type": "CHAT_RECV", "message": chat_msg})
+
+    async def _h_dm_long_rest(self, conn: ClientConn, msg: dict) -> None:
+        if not conn.is_host:
+            return
+        patches = []
+        for pid, player in self.state.players.items():
+            changed = False
+            for item in list(player.Equipment.values()) + list(player.Inventory):
+                if item.Actions:
+                    for action in item.Actions.values():
+                        casts = action.get("Casts")
+                        if casts:
+                            casts["remaining"] = casts.get("max_per_rest", 0)
+                            changed = True
+            if changed:
+                patches.append({"op": "set_player", "path": pid,
+                                 "value": player.to_dict()})
+        for (cx, cy), cell in self.state.grid.items():
+            if isinstance(cell.occupant, NPC):
+                npc = cell.occupant
+                if npc.Actions:
+                    changed = False
+                    for action in npc.Actions.values():
+                        casts = action.get("Casts")
+                        if casts:
+                            casts["remaining"] = casts.get("max_per_rest", 0)
+                            changed = True
+                    if changed:
+                        patches.append({"op": "set_cell",
+                                         "path": f"{cx},{cy}",
+                                         "value": cell.to_dict()})
+        if patches:
+            await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+        await self._broadcast({"type": "CHAT_RECV", "message": {
+            "sender_uuid": "SYSTEM", "sender_alias": "SYSTEM",
+            "content": "🌙 Long Rest — all action charges restored.",
+            "msg_type": "system", "recipient_uuid": None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }})
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

@@ -72,23 +72,50 @@ class MainMenuScreen(tk.Frame):
 
         profile_row = tk.Frame(card, bg=PALETTE["card"])
         profile_row.pack(fill=tk.X, pady=(0, 4))
-        flat_btn(profile_row, f"👤  {profile_label}",
-                 self._on_profile, style="ghost").pack(side=tk.LEFT)
+
+        flat_btn(
+            profile_row,
+            f"👤  {profile_label}",
+            self._on_profile,
+            style="ghost"
+        ).pack(fill=tk.X, ipady=4)
+
+        # ── Hint row ──────────────────────────────────────────────────────────
         if not has_profile:
-            tk.Label(profile_row,
-                     text="← Set up your player to continue",
-                     bg=PALETTE["card"], fg=PALETTE["warning"],
-                     font=FONTS["small"]).pack(side=tk.LEFT, padx=10)
+            tk.Label(
+                card,
+                text="← Set up your player to continue",
+                bg=PALETTE["card"],
+                fg=PALETTE["warning"],
+                font=FONTS["small"]
+            ).pack(pady=(0, 8))
 
         # ── Host / Join inline ────────────────────────────────────────────────
         hj_row = tk.Frame(card, bg=PALETTE["card"])
         hj_row.pack(fill=tk.X, pady=4)
+
+        hj_row.grid_columnconfigure(0, weight=1)
+        hj_row.grid_columnconfigure(1, weight=1)
+
         state = tk.NORMAL if has_profile else tk.DISABLED
-        host_btn = flat_btn(hj_row, "🖥  Host", self._on_host, style="normal")
-        host_btn.pack(side=tk.LEFT, padx=(0, 8), ipady=3)
+
+        host_btn = flat_btn(
+            hj_row,
+            "🖥  Host",
+            self._on_host,
+            style="normal"
+        )
+        host_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=4)
+
+        join_btn = flat_btn(
+            hj_row,
+            "🌐  Join",
+            self._on_join,
+            style="normal"  # use normal instead of ghost
+        )
+        join_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
+
         host_btn.config(state=state)
-        join_btn = flat_btn(hj_row, "🌐  Join", self._on_join, style="ghost")
-        join_btn.pack(side=tk.LEFT, ipady=3)
         join_btn.config(state=state)
 
         # ── Quit ──────────────────────────────────────────────────────────────

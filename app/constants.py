@@ -24,14 +24,14 @@ PALETTE = {
 }
 
 FONTS = {
-    "title":   ("Segoe UI", 20, "bold"),
-    "heading": ("Segoe UI", 13, "bold"),
-    "sub":     ("Segoe UI", 11, "bold"),
-    "body":    ("Segoe UI", 10),
-    "small":   ("Segoe UI", 8),
-    "mono":    ("Consolas", 10),
-    "chat":    ("Segoe UI", 9),
-    "icon":    ("Segoe UI", 14),
+    "title":   ("Segoe UI", 24, "bold"),
+    "heading": ("Segoe UI", 16, "bold"),
+    "sub":     ("Segoe UI", 13, "bold"),
+    "body":    ("Segoe UI", 12),
+    "small":   ("Segoe UI", 10),
+    "mono":    ("Consolas", 11),
+    "chat":    ("Segoe UI", 11),
+    "icon":    ("Segoe UI", 18),
 }
 
 TAG_COLOURS = {
