@@ -49,6 +49,8 @@ class GameCanvas(tk.Canvas):
         self.y_held: bool = False
         self._erasing: bool = False
         self._erased_cells: Set[Tuple[int, int]] = set()
+        # Paintbrush size (1 = single cell, N = Chebyshev radius N-1)
+        self.brush_size: int = 1
 
         self.bubbles: List[dict] = []
 
@@ -667,40 +669,35 @@ class GameCanvas(tk.Canvas):
                 return
 
             if self.y_held:
-                # Wall mode
                 self._painting = True
                 self._paint_type = "wall"
-                self._painted_cells = {(gx, gy)}
-                self._place_wall_at(gx, gy)
+                self._painted_cells = set()
+                self._apply_brush(gx, gy)
                 return
 
             if self.u_held:
-                # Water mode — skip protected cells
                 if (cell and cell.protected) or (cell and cell.occupant):
                     self._painting = False
                     return
                 self._painting = True
                 self._paint_type = "water"
-                self._painted_cells = {(gx, gy)}
-                self.send({"type": "DM_TILE_SET",
-                           "cell": [gx, gy], "walkable": False, "tile_type": "water"})
+                self._painted_cells = set()
+                self._apply_brush(gx, gy)
                 return
 
             if cell and cell.occupant:
-                # Wall occupant → clear it on click/drag (item 2)
                 if isinstance(cell.occupant, Wall):
                     self._painting = True
                     self._paint_type = "wall_clear"
-                    self._painted_cells = {(gx, gy)}
-                    self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
+                    self._painted_cells = set()
+                    self._apply_brush(gx, gy)
                 else:
-                    # Object drag (NPC, Item, Door)
+                    # Object drag — single cell, no brush
                     self._drag_source = (gx, gy)
                     self._drag_obj = cell.occupant
                     self._drag_mouse = (event.x, event.y)
                     self._painting = False
             else:
-                # Ground paint — skip protected cells
                 if cell and cell.protected:
                     self._painting = False
                     return
@@ -708,9 +705,8 @@ class GameCanvas(tk.Canvas):
                 if cell is None or not cell.walkable or tile_type == "water":
                     self._painting = True
                     self._paint_type = "ground"
-                    self._painted_cells = {(gx, gy)}
-                    self.send({"type": "DM_TILE_SET",
-                               "cell": [gx, gy], "walkable": True, "tile_type": "ground"})
+                    self._painted_cells = set()
+                    self._apply_brush(gx, gy)
                 else:
                     self._painting = False
         else:
@@ -752,44 +748,8 @@ class GameCanvas(tk.Canvas):
         if not (self._painting and self.is_dm):
             return
         gx, gy = self._canvas_to_cell(event.x, event.y)
-        if (gx, gy) in self._painted_cells:
-            return
-        cell = self.state.grid.get((gx, gy))
-        pt = self._paint_type
-
-        # Never paint over protected cells
-        if cell and cell.protected:
-            return
-
-        if pt == "wall_clear":
-            # Clear wall objects encountered while dragging
-            if cell and isinstance(cell.occupant, Wall):
-                self._painted_cells.add((gx, gy))
-                self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
-            return
-
-        if pt == "wall":
-            if cell and cell.occupant:
-                return
-            self._painted_cells.add((gx, gy))
-            self._place_wall_at(gx, gy)
-        elif pt == "water":
-            if cell and cell.occupant:
-                return
-            if cell is None or (cell.tile_type == "ground" and not cell.occupant):
-                self._painted_cells.add((gx, gy))
-                self.send({"type": "DM_TILE_SET",
-                           "cell": [gx, gy], "walkable": False, "tile_type": "water"})
-        else:  # ground
-            # Clear walls encountered during any ground-mode drag (item 5)
-            if cell and isinstance(cell.occupant, Wall):
-                self._painted_cells.add((gx, gy))
-                self.send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
-            elif cell is None or cell.tile_type == "water":
-                if cell is None or not cell.occupant:
-                    self._painted_cells.add((gx, gy))
-                    self.send({"type": "DM_TILE_SET",
-                               "cell": [gx, gy], "walkable": True, "tile_type": "ground"})
+        # _apply_brush handles deduplication via _painted_cells internally
+        self._apply_brush(gx, gy)
 
     def _on_drag_end(self, event) -> None:
         self._painting = False
@@ -816,18 +776,20 @@ class GameCanvas(tk.Canvas):
         if not self.is_dm:
             return
         if self.state.combat and self.state.combat.active:
-            return  # no tile deletion during combat
+            return
         gx, gy = self._canvas_to_cell(event.x, event.y)
         self._erasing = True
         self._erased_cells = set()
-        self._try_erase(gx, gy)
+        for bx, by in self._brush_cells(gx, gy):
+            self._try_erase(bx, by)
 
     def _on_middle_drag(self, event) -> None:
         if not self._erasing or not self.is_dm:
             return
         gx, gy = self._canvas_to_cell(event.x, event.y)
-        if (gx, gy) not in self._erased_cells:
-            self._try_erase(gx, gy)
+        for bx, by in self._brush_cells(gx, gy):
+            if (bx, by) not in self._erased_cells:
+                self._try_erase(bx, by)
 
     def _on_middle_release(self, event) -> None:
         self._erasing = False
@@ -870,9 +832,73 @@ class GameCanvas(tk.Canvas):
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def invalidate_water_depth(self) -> None:
-        """Force-clear the water depth cache (called after cell patches)."""
+        """Force-clear the full water depth cache."""
         self._water_depth_cache = {}
         self._water_cache_key = 0
+
+    def mark_tile_dirty(self) -> None:
+        """No-op in the non-PIL renderer (kept for API compatibility)."""
+        pass
+
+    def invalidate_water_near(self, gx: int, gy: int, ground_changed: bool) -> None:
+        """Targeted cache invalidation: only evict depth entries within radius 5
+        when a ground tile changes (water depth depends only on ground proximity)."""
+        if ground_changed:
+            r = 5
+            for cx in range(gx - r, gx + r + 1):
+                for cy in range(gy - r, gy + r + 1):
+                    self._water_depth_cache.pop((cx, cy), None)
+
+    # ── brush helpers ─────────────────────────────────────────────────────────
+
+    def _brush_cells(self, gx: int, gy: int) -> List[Tuple[int, int]]:
+        """All cells within Chebyshev radius (brush_size - 1) of (gx, gy)."""
+        r = self.brush_size - 1
+        return [(gx + dx, gy + dy)
+                for dx in range(-r, r + 1)
+                for dy in range(-r, r + 1)]
+
+    def _apply_brush(self, gx: int, gy: int) -> None:
+        """Apply _paint_type to every cell in the brush centered on (gx, gy),
+        skipping cells already in _painted_cells or that fail validity checks."""
+        pt = self._paint_type
+        for bx, by in self._brush_cells(gx, gy):
+            if (bx, by) in self._painted_cells:
+                continue
+            cell = self.state.grid.get((bx, by))
+
+            if pt == "wall_clear":
+                if cell and isinstance(cell.occupant, Wall):
+                    self._painted_cells.add((bx, by))
+                    self.send({"type": "DM_DELETE_OBJECT", "cell": [bx, by]})
+
+            elif pt == "wall":
+                if cell and (cell.protected or cell.occupant):
+                    continue
+                self._painted_cells.add((bx, by))
+                self._place_wall_at(bx, by)
+
+            elif pt == "water":
+                if (cell and cell.protected) or (cell and cell.occupant):
+                    continue
+                if cell is None or (cell.tile_type == "ground" and not cell.occupant):
+                    self._painted_cells.add((bx, by))
+                    self.send({"type": "DM_TILE_SET",
+                               "cell": [bx, by], "walkable": False,
+                               "tile_type": "water"})
+
+            else:  # ground
+                if cell and cell.protected:
+                    continue
+                if cell and isinstance(cell.occupant, Wall):
+                    self._painted_cells.add((bx, by))
+                    self.send({"type": "DM_DELETE_OBJECT", "cell": [bx, by]})
+                elif cell is None or cell.tile_type == "water":
+                    if cell is None or not cell.occupant:
+                        self._painted_cells.add((bx, by))
+                        self.send({"type": "DM_TILE_SET",
+                                   "cell": [bx, by], "walkable": True,
+                                   "tile_type": "ground"})
 
     def center_on_origin_grid(self) -> None:
         """Centre the viewport on the middle of the initial 4×4 grid block."""

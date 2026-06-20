@@ -50,7 +50,7 @@ class MainMenuScreen(tk.Frame):
         # Title
         tk.Label(card, text="STEEL2D", bg=PALETTE["card"],
                  fg=PALETTE["fg"], font=FONTS["title"]).pack()
-        tk.Label(card, text="v0.4.0  ·  multiplayer tabletop lobby",
+        tk.Label(card, text="v0.11.2  ·  multiplayer tabletop lobby",
                  bg=PALETTE["card"], fg=PALETTE["muted"],
                  font=FONTS["small"]).pack(pady=(0, 6))
         hr(card).pack(fill=tk.X, pady=8)

@@ -50,6 +50,10 @@ class GameScreen(tk.Frame):
         self._pan_active: bool = False
         self._PAN_SPEED: int = 9  # canvas pixels per frame
 
+        # Paintbrush size keys (DM only)
+        self._brush_keys: set = set()   # contains +1 and/or -1
+        self._brush_active: bool = False
+
         self._build()
         self._start_poll()
         if client:
@@ -71,6 +75,14 @@ class GameScreen(tk.Frame):
                 font=FONTS["small"], padx=10,
             )
             self._conn_lbl.pack(side=tk.LEFT, pady=2)
+            # Paintbrush size indicator (right side of HUD)
+            self._brush_lbl = tk.Label(
+                self._hud,
+                text="Paintbrush Size: 1",
+                bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
+                font=FONTS["small"], padx=10,
+            )
+            self._brush_lbl.pack(side=tk.RIGHT, pady=2)
 
         self._canvas = GameCanvas(
             self, self.state, self.local_uuid, self.is_dm,
@@ -143,6 +155,11 @@ class GameScreen(tk.Frame):
         root.bind("<KeyRelease-u>", lambda e: self._set_paint_key("u", False))
         root.bind("<KeyPress-y>",   lambda e: self._set_paint_key("y", True))
         root.bind("<KeyRelease-y>", lambda e: self._set_paint_key("y", False))
+        # [ / ] → change paintbrush size (DM only, hold to repeat)
+        root.bind("<KeyPress-bracketleft>",    lambda e: self._brush_key_press(-1))
+        root.bind("<KeyRelease-bracketleft>",  lambda e: self._brush_key_release(-1))
+        root.bind("<KeyPress-bracketright>",   lambda e: self._brush_key_press(+1))
+        root.bind("<KeyRelease-bracketright>", lambda e: self._brush_key_release(+1))
 
     def _set_paint_key(self, key: str, held: bool) -> None:
         if not self.is_dm:
@@ -151,6 +168,32 @@ class GameScreen(tk.Frame):
             self._canvas.u_held = held
         elif key == "y":
             self._canvas.y_held = held
+
+    # ── paintbrush size (Numpad +/-) ─────────────────────────────────────────
+
+    def _brush_key_press(self, delta: int) -> None:
+        if not self.is_dm or self._is_chat_focused():
+            return
+        self._brush_keys.add(delta)
+        if not self._brush_active:
+            self._brush_active = True
+            self._brush_tick()
+
+    def _brush_key_release(self, delta: int) -> None:
+        self._brush_keys.discard(delta)
+
+    def _brush_tick(self) -> None:
+        if not self._brush_keys:
+            self._brush_active = False
+            return
+        net = sum(self._brush_keys)   # +1, -1, or 0 when both held
+        if net:
+            new_size = max(1, min(10, self._canvas.brush_size + net))
+            if new_size != self._canvas.brush_size:
+                self._canvas.brush_size = new_size
+                if hasattr(self, "_brush_lbl"):
+                    self._brush_lbl.config(text=f"Paintbrush Size: {new_size}")
+        self.after(100, self._brush_tick)   # 10 increments/sec while held
 
     # ── smooth DM pan ─────────────────────────────────────────────────────────
 
