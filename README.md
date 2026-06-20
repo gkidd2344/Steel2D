@@ -1,6 +1,6 @@
 # Steel2D — Full Technical Requirements
 **Target audience:** Claude Code (automated implementation)  
-**Version:** 0.11.0  
+**Version:** 0.11.2  
 **Supersedes:** REQUIREMENTS v0.4.0
 
 ---
@@ -802,6 +802,35 @@ NPC HP hits 0 -> 500 ms fade to black (10 steps x 50 ms). Cell occupant removed 
 
 **Protected cells (0-3, 0-3)** are silently skipped by all painting operations.
 
+### 11.3 Paintbrush Size
+
+The DM HUD (top bar, right side) always shows **Paintbrush Size: N**. Size determines how many cells are affected by each painting or erasing operation:
+
+| Size | Affected area | Chebyshev radius |
+|---|---|---|
+| 1 (default) | Single hovered cell | 0 |
+| 2 | 3×3 block | 1 |
+| 3 | 5×5 block | 2 |
+| N | (2N-1) × (2N-1) | N-1 |
+| 10 (max) | 19×19 block | 9 |
+
+Brush size applies to **all** left-drag painting modes (ground, water, wall, wall-clear) and to **middle-mouse erasing**. Object drag is always single-cell regardless of brush size.
+
+Size is clamped to `[1, 10]`. While `]` or `[` is held, size increments/decrements at 10 steps/second.
+
+---
+
+### 11.4 Known Performance Limitation
+
+The renderer uses tkinter's Canvas widget with individual draw calls (rectangle per tile, line per grid line). **Performance degrades proportionally to the total number of filled grid cells:**
+
+- ~50 filled cells: mild frame-rate drop noticeable.
+- ~200+ filled cells: camera panning becomes jittery; tile spawn/delete operations slow noticeably.
+
+This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.11.2.
+
+**Workaround:** middle-mouse drag (with a large brush size) over large regions deletes tiles quickly, reducing the cell count and restoring performance. The performance issue is **content-count-driven** (not content-type-driven — ground tiles without any shading cause the same drop as water tiles).
+
 ---
 
 ## 12. Object System
@@ -1291,7 +1320,7 @@ Steps:
 2. Create `.venv` if not present.
 3. Install `Pillow>=10.0`, `msgpack>=1.0`, `pyinstaller>=6.0`.
 4. `pyinstaller --clean --noconfirm Steel2D.spec` -> `dist/Steel2D/`.
-5. PowerShell `Compress-Archive 'dist\Steel2D' -> 'dist\Steel2D.zip'` (non-fatal if PowerShell unavailable).
+5. Deletes any existing `Steel2D-*.zip` in the project root, then PowerShell `Compress-Archive 'dist\Steel2D' -> 'Steel2D.zip'` in the project root (non-fatal if PowerShell unavailable).
 
 ### 22.2 Output
 
@@ -1299,9 +1328,11 @@ Steps:
 |---|---|
 | `dist/Steel2D/Steel2D.exe` | Launch directly (double-click) |
 | `dist/Steel2D/` | Full distributable folder |
-| `dist/Steel2D.zip` | Portable archive; share this |
+| `Steel2D.zip` | Portable archive in **project root**; share this |
 
 Zip structure: `Steel2D.zip -> Steel2D/ -> Steel2D.exe + _internal/...`
+
+Only one build zip exists in the project root at a time — previous ones are deleted before the new zip is created.
 
 Recipients extract zip, enter `Steel2D/`, double-click `Steel2D.exe`. No Python or install required.
 
