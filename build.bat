@@ -45,7 +45,7 @@ echo Found Python: %PYTHON%
 %PYTHON% --version
 echo.
 
-echo [1/4] Creating virtual environment...
+echo [1/5] Creating virtual environment...
 if exist ".venv" (
     echo        .venv already exists.
 ) else (
@@ -57,7 +57,7 @@ if exist ".venv" (
     )
 )
 
-echo [2/4] Installing dependencies...
+echo [2/5] Installing dependencies...
 call .venv\Scripts\activate.bat
 pip install --upgrade pip --quiet
 pip install Pillow>=10.0 msgpack>=1.0 pyinstaller>=6.0 --quiet
@@ -67,7 +67,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/4] Building executable with PyInstaller...
+echo [3/5] Building executable with PyInstaller...
 pyinstaller --clean --noconfirm Steel2D.spec
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed. Check output above for details.
@@ -75,15 +75,26 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/4] Done!
+echo [4/5] Creating portable zip (dist\Steel2D.zip)...
+if exist "dist\Steel2D.zip" del /f /q "dist\Steel2D.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Compress-Archive -Path 'dist\Steel2D' -DestinationPath 'dist\Steel2D.zip' -Force"
+if errorlevel 1 (
+    echo WARNING: Could not create zip -- dist\Steel2D folder is still usable.
+) else (
+    echo        Created: dist\Steel2D.zip
+)
+
+echo [5/5] Done!
 echo.
 echo ============================================================
-echo  Output: dist\Steel2D\Steel2D.exe
+echo  Executable : dist\Steel2D\Steel2D.exe
+echo  Portable   : dist\Steel2D.zip
 echo.
-echo  To distribute:
-echo    Zip the entire "dist\Steel2D" folder and share it.
-echo    Recipients double-click Steel2D.exe -- no install needed.
-echo    Game saves go to: %%APPDATA%%\Steel2D\saves\
+echo  To distribute, share dist\Steel2D.zip
+echo  Recipient extracts the zip and double-clicks Steel2D.exe
+echo  No installation or Python required.
+echo  Game data goes to: %%APPDATA%%\Steel2D\
 echo ============================================================
 echo.
 pause

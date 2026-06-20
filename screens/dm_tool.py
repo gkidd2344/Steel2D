@@ -253,12 +253,14 @@ class DmToolScreen(tk.Frame):
             row.pack(fill=tk.X)
             self._row_frames.append(row)
 
-            name = str(obj.get("Name", obj.get("type", "?")))
-            otype = str(obj.get("type", "?"))
-            desc = str(obj.get("Description", ""))
-            for val, w in _COLS:
-                # truncate to column width (approx char budget)
-                display = locals()[val.lower().replace(" ", "")][:w]
+            # Map column titles to their values directly (avoids locals() KeyError)
+            col_values = {
+                "name":        str(obj.get("Name", obj.get("type", "?"))),
+                "type":        str(obj.get("type", "?")),
+                "description": str(obj.get("Description", "")),
+            }
+            for col_title, w in _COLS:
+                display = col_values.get(col_title.lower(), "")[:w]
                 tk.Label(row, text=display, bg=bg, fg=PALETTE["fg"],
                          font=FONTS["body"], width=w,
                          anchor="w", padx=6).pack(side=tk.LEFT)
@@ -878,12 +880,13 @@ class _EmbeddedSpawnForm(tk.Frame):
 
         # Unique name check (NPC/Item/Action/Buff)
         if obj.get("type") in self._UNIQUE_NAME_TYPES:
+            obj_type  = obj.get("type")
             name_lower = obj.get("Name", "").strip().lower()
             for existing in self._get_session_objects():
-                if (existing.get("type") in self._UNIQUE_NAME_TYPES and
+                if (existing.get("type") == obj_type and
                         existing.get("Name", "").strip().lower() == name_lower):
                     self._err_var.set(
-                        f"An object named '{obj.get('Name')}' already exists.")
+                        f"A {obj_type} named '{obj.get('Name')}' already exists.")
                     return
 
         self._on_add(obj)
