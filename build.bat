@@ -75,23 +75,27 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/5] Creating portable zip (dist\Steel2D.zip)...
-if exist "dist\Steel2D.zip" del /f /q "dist\Steel2D.zip"
+echo [4/5] Creating portable zip...
+:: Get build timestamp (yyyyMMddHHmm -> e.g. 202606192036)
+for /f "tokens=*" %%T in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMddHHmm'"') do set BUILD_TS=%%T
+set ZIP_NAME=Steel2D-%BUILD_TS%.zip
+:: Remove any previous Steel2D-*.zip in the project root
+for %%F in (Steel2D-*.zip) do del /f /q "%%F"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Compress-Archive -Path 'dist\Steel2D' -DestinationPath 'dist\Steel2D.zip' -Force"
+    "Compress-Archive -Path 'dist\Steel2D' -DestinationPath '%ZIP_NAME%' -Force"
 if errorlevel 1 (
     echo WARNING: Could not create zip -- dist\Steel2D folder is still usable.
 ) else (
-    echo        Created: dist\Steel2D.zip
+    echo        Created: %ZIP_NAME%
 )
 
 echo [5/5] Done!
 echo.
 echo ============================================================
 echo  Executable : dist\Steel2D\Steel2D.exe
-echo  Portable   : dist\Steel2D.zip
+echo  Portable   : %ZIP_NAME%
 echo.
-echo  To distribute, share dist\Steel2D.zip
+echo  To distribute, share %ZIP_NAME%
 echo  Recipient extracts the zip and double-clicks Steel2D.exe
 echo  No installation or Python required.
 echo  Game data goes to: %%APPDATA%%\Steel2D\
