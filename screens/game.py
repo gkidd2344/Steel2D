@@ -10,9 +10,10 @@ from typing import Optional, Callable, Tuple, TYPE_CHECKING
 from app.constants import PALETTE, FONTS, BASE_CELL_PX, POLL_INTERVAL_MS
 from ui.panel import Panel
 from app.config import STAT_KEYS
-from game.objects import NPC, Item, Door, PlayerObject, occupant_from_dict
+from game.objects import NPC, Item, Door, Wall, Stairs, PlayerObject, occupant_from_dict
 from game.state import GameState, Cell, GameSettings, CombatState, CombatTurn
-from game.stats import clamp_stats, calc_max_hp, effective_stat
+from game.stats import clamp_stats, calc_max_hp, effective_stat, calculate_damage
+from game.state import find_combat_move_cells
 from game.los import cells_in_range
 from ui.canvas_renderer import GameCanvas
 from ui.chat_widget import ChatWidget
@@ -27,7 +28,7 @@ class GameScreen(tk.Frame):
     def __init__(self, parent, state: GameState, client: "GameClient",
                  server: Optional["GameServer"], ui_queue: queue.Queue,
                  local_uuid: str, is_dm: bool,
-                 prefabs: list = None, **kwargs):
+                 prefabs: list = None, host_uuid: str = "", **kwargs):
         super().__init__(parent, bg=PALETTE["bg"], **kwargs)
         self.state = state
         self.client = client
@@ -36,9 +37,19 @@ class GameScreen(tk.Frame):
         self.local_uuid = local_uuid
         self.is_dm = is_dm
         self.prefabs: list = prefabs or []
+        # DM UUID — used by ChatWidget to tag DM messages; correct for both roles
+        self._dm_uuid: str = (server.host_uuid if server else
+                              host_uuid if host_uuid else local_uuid)
+        # Track whether a blocking interaction panel (Door/Stairs) is open
+        self._interaction_panel = None
         self._latencies: dict = {}
         self._player_list_overlay = None
         self._turn_panel = None
+        self._combat_actions_panel = None
+        # Combat state tracking
+        self._combat_active_locally: bool = False  # set by COMBAT_STARTED/ENDED events
+        self._combat_ui_mode: str = "normal"       # "normal"|"move_select"|"action_select"|"action_target"
+        self._combat_pending_action: dict = {}
         self._esc_open = False
         self._esc_panel = None
         self._tab_panel = None
@@ -91,13 +102,12 @@ class GameScreen(tk.Frame):
         )
         self._canvas.pack(fill=tk.BOTH, expand=True)
 
-        host_uuid = self.server.host_uuid if self.server else self.local_uuid
         self._chat = ChatWidget(
             self._canvas,
             on_send=self._on_chat_send,
             is_dm=self.is_dm,
             game_state=self.state,
-            host_uuid=host_uuid,
+            host_uuid=self._dm_uuid,   # correct for both DM and PC roles
         )
         CW = ChatWidget.WIDTH
         CH = ChatWidget.HEIGHT
@@ -207,6 +217,9 @@ class GameScreen(tk.Frame):
     def _on_key_press(self, event) -> None:
         if self._is_chat_focused():
             return
+        # Block PC movement while a blocking interaction dialogue is open
+        if not self.is_dm and self._is_interaction_active():
+            return
         key = event.keysym.lower()
         if key not in self._PAN_KEY_MAP:
             return
@@ -216,6 +229,9 @@ class GameScreen(tk.Frame):
                 self._pan_active = True
                 self._pan_tick()
         else:
+            # WASD movement disabled during turn-based combat — use the combat panel
+            if self.state.combat and self.state.combat.active:
+                return
             dx, dy = self._PAN_KEY_MAP[key]
             pc = self._canvas._player_cell()
             if pc:
@@ -271,20 +287,18 @@ class GameScreen(tk.Frame):
             if not self.is_dm:
                 new_cell = self.state.find_player_cell(self.local_uuid)
                 if new_cell and new_cell != prev_cell:
-                    # ── Stair landing prompt ──────────────────────────────────
-                    from game.objects import Stairs as _S
-                    gc = self.state.grid.get(new_cell)
-                    if gc and isinstance(gc.occupant, _S):
-                        stair = gc.occupant
-                        self.after(60, lambda s=stair, c=new_cell:
-                                   self._show_stair_prompt(s, c))
+                    dist = (max(abs(new_cell[0] - prev_cell[0]),
+                                abs(new_cell[1] - prev_cell[1]))
+                            if prev_cell else 2)
 
-                    # ── Camera follow on teleport (distance > 1 cell) ─────────
-                    if prev_cell:
-                        dist = max(abs(new_cell[0] - prev_cell[0]),
-                                   abs(new_cell[1] - prev_cell[1]))
-                        if dist > 1:
-                            self._canvas.center_on_cell(new_cell[0], new_cell[1])
+                    # ── Stair prompt ONLY on WASD step (dist==1); skip teleport ─
+                    if dist == 1:
+                        from game.objects import Stairs as _S
+                        gc = self.state.grid.get(new_cell)
+                        if gc and isinstance(gc.occupant, _S):
+                            stair = gc.occupant
+                            self.after(60, lambda s=stair, c=new_cell:
+                                       self._show_stair_prompt(s, c))
         elif event_type == "CHAT_RECV":
             msg = payload.get("message", payload)
             self._chat.add_message(msg)
@@ -306,11 +320,27 @@ class GameScreen(tk.Frame):
             reason = payload.get("reason", "You were removed from the server.")
             messagebox.showerror("Disconnected", reason)
             self._go_main_menu()
+        elif event_type == "PLAYER_DATA":
+            # Server sent us our final player state — persist as character save
+            if not self.is_dm:
+                player_dict = payload.get("player")
+                if player_dict:
+                    try:
+                        from app.config import save_character
+                        save_character(player_dict)
+                    except Exception:
+                        pass
         elif event_type == "DISCONNECTED":
-            self._chat.add_local("Disconnected from server.", "error")
+            root = self.winfo_toplevel()
+            self._go_main_menu()
+            root.after(150, lambda r=root: self._show_disconnected_notice(r))
         elif event_type == "PONG":
             pass
         elif event_type == "COMBAT_STARTED":
+            self._combat_active_locally = True
+            self._combat_ui_mode = "normal"
+            self._canvas.set_combat_move_mode(False)
+            self._canvas.set_combat_action(None, set())
             self.state.combat = CombatState(
                 active=True,
                 turn_queue=[CombatTurn.from_dict(t) for t in payload.get("turn_queue", [])],
@@ -319,12 +349,22 @@ class GameScreen(tk.Frame):
             self._refresh_combat_ui()
             self._chat.add_local("⚔ Combat started!", "system")
         elif event_type == "COMBAT_ENDED":
+            self._combat_active_locally = False
+            self._combat_ui_mode = "normal"
+            self._canvas.set_combat_move_mode(False)
+            self._canvas.set_combat_action(None, set())
+            self._canvas.set_combat_valid_moves(set())
             if self.state.combat:
                 self.state.combat.active = False
                 self.state.combat.turn_queue = []
             self._refresh_combat_ui()
             self._chat.add_local("Combat ended.", "system")
         elif event_type == "COMBAT_TURN_ADVANCED":
+            # New turn: reset UI mode and move/action selection
+            self._combat_ui_mode = "normal"
+            self._canvas.set_combat_move_mode(False)
+            self._canvas.set_combat_action(None, set())
+            self._canvas.set_combat_valid_moves(set())
             cur = payload.get("current", {})
             round_n = payload.get("round", 1)
             if self.state.combat:
@@ -333,10 +373,11 @@ class GameScreen(tk.Frame):
                     0,
                 )
                 self.state.combat.round_number = round_n
-                cur_turn = self.state.combat.turn_queue[self.state.combat.current_index] if self.state.combat.turn_queue else None
+                cur_turn = (self.state.combat.turn_queue[self.state.combat.current_index]
+                            if self.state.combat.turn_queue else None)
                 if cur_turn:
-                    cur_turn.has_moved = False
                     cur_turn.has_acted = False
+                    cur_turn.points_spent = 0.0
                     if cur_turn.combatant_type == "npc" and self.is_dm:
                         self._chat.set_npc_impersonate(cur_turn.name)
                     else:
@@ -347,8 +388,11 @@ class GameScreen(tk.Frame):
             if self.state.combat:
                 for t in self.state.combat.turn_queue:
                     if t.id == cid:
-                        t.has_moved = payload.get("has_moved", t.has_moved)
                         t.has_acted = payload.get("has_acted", t.has_acted)
+                        t.points_spent = float(payload.get("points_spent", t.points_spent))
+            # Reset move mode after any resource is used
+            self._canvas.set_combat_move_mode(False)
+            self._combat_ui_mode = "normal"
             self._refresh_combat_ui()
 
     def _should_show_bubble(self, msg: dict) -> bool:
@@ -386,7 +430,12 @@ class GameScreen(tk.Frame):
                 if value is None:
                     self.state.combat = None
                 else:
-                    self.state.combat = CombatState.from_dict(value)
+                    new_cs = CombatState.from_dict(value)
+                    # Guard: if COMBAT_ENDED already fired locally, don't let a stale
+                    # set_combat{active:True} re-enable combat (race condition fix).
+                    if not self._combat_active_locally:
+                        new_cs.active = False
+                    self.state.combat = new_cs
 
     # ── combat helpers ────────────────────────────────────────────────────────
 
@@ -412,6 +461,10 @@ class GameScreen(tk.Frame):
             self._turn_panel.destroy()
             self._turn_panel = None
 
+        if self._combat_actions_panel and self._combat_actions_panel.winfo_exists():
+            self._combat_actions_panel.destroy()
+            self._combat_actions_panel = None
+
         if in_combat:
             from dialogs.combat_overlay import TurnOrderPanel
             self._turn_panel = TurnOrderPanel(
@@ -421,6 +474,10 @@ class GameScreen(tk.Frame):
             self._turn_panel.place(relx=1.0, x=-TurnOrderPanel.WIDTH,
                                    rely=0, y=0, relheight=1.0,
                                    width=TurnOrderPanel.WIDTH)
+            self._precompute_combat_moves()
+            self._rebuild_combat_actions_panel()
+        else:
+            self._canvas.set_combat_valid_moves(set())
 
         self._update_hud()
 
@@ -515,6 +572,7 @@ class GameScreen(tk.Frame):
         self._c_panel = PlayerStatsDialog(
             self.winfo_toplevel(), player,
             on_save_stats=lambda s: self._send({"type": "STATS_UPDATE", "stats": s}),
+            multiplier=self.state.settings.hp_base_multiplier,
         )
 
     def _on_enter(self, event) -> None:
@@ -539,6 +597,16 @@ class GameScreen(tk.Frame):
 
         if context == "combat_action_confirm":
             self._confirm_combat_action(gx, gy)
+            return
+
+        if context == "combat_move":
+            self._combat_do_move(gx, gy)
+            return
+
+        if context == "combat_targeting_cancelled":
+            self._combat_ui_mode = "normal"
+            self._canvas.set_combat_move_mode(False)
+            self._rebuild_combat_actions_panel()
             return
 
         if context == "own_cell_interact" and not self.is_dm:
@@ -571,7 +639,8 @@ class GameScreen(tk.Frame):
             from dialogs.door_dialog import DoorInteractionDialog
             def _action(act):
                 self._send({"type": "DOOR_INTERACT", "cell": [gx, gy], "action": act})
-            DoorInteractionDialog(self.winfo_toplevel(), obj, _action)
+            door_panel = DoorInteractionDialog(self.winfo_toplevel(), obj, _action)
+            self._interaction_panel = door_panel
         elif isinstance(obj, NPC):
             self._npc_context_menu(gx, gy, obj)
         elif isinstance(obj, Item):
@@ -665,18 +734,416 @@ class GameScreen(tk.Frame):
         action_info = self._canvas._combat_action
         if not action_info:
             return
-        cell = self.state.grid.get((tx, ty))
-        target = cell.occupant if cell else None
-        # Send regardless of occupant — server handles fizzle on empty cell
-        target_id = target.id if target else ""
-        self._send({
-            "type": "PLAYER_ACTION",
-            "action_name": action_info.get("action_name", ""),
-            "item_id": action_info.get("item_id"),
-            "target_id": target_id,
-            "target_cell": [tx, ty],
-        })
+        if "_on_target" in action_info:
+            action_info["_on_target"](tx, ty)
+        else:
+            cell = self.state.grid.get((tx, ty))
+            target = cell.occupant if cell else None
+            target_id = target.id if (target and hasattr(target, "id")) else ""
+            self._send({
+                "type": "PLAYER_ACTION",
+                "action_name": action_info.get("action_name", ""),
+                "item_id": action_info.get("item_id"),
+                "target_id": target_id,
+                "target_cell": [tx, ty],
+            })
         self._canvas.set_combat_action(None, set())
+        self._combat_ui_mode = "normal"
+        self._rebuild_combat_actions_panel()
+
+    # ── combat actions panel ──────────────────────────────────────────────────
+
+    def _precompute_combat_moves(self) -> None:
+        """BFS-compute valid move destinations for the current combatant and
+        store them in the canvas so highlights and click-validation both use
+        the same pre-computed set.  Cleared when it is not this client's turn."""
+        ct = self._current_turn()
+        if not ct or not ct.can_move:
+            self._canvas.set_combat_valid_moves(set())
+            return
+
+        if ct.combatant_type == "player" and ct.id == self.local_uuid:
+            from_cell = self._canvas._player_cell()
+        elif ct.combatant_type == "npc" and self.is_dm:
+            from_cell = self.state.find_object_cell(ct.id)
+        else:
+            self._canvas.set_combat_valid_moves(set())
+            return
+
+        if not from_cell:
+            self._canvas.set_combat_valid_moves(set())
+            return
+
+        valid = find_combat_move_cells(self.state, from_cell)
+        self._canvas.set_combat_valid_moves(valid)
+
+    def _rebuild_combat_actions_panel(self) -> None:
+        """Create or refresh the left-side combat actions panel for current combatant."""
+        if self._combat_actions_panel and self._combat_actions_panel.winfo_exists():
+            self._combat_actions_panel.destroy()
+        self._combat_actions_panel = None
+
+        if not (self.state.combat and self.state.combat.active):
+            return
+        ct = self._current_turn()
+        if not ct:
+            return
+        my_turn = (
+            (ct.combatant_type == "player" and ct.id == self.local_uuid) or
+            (ct.combatant_type == "npc" and self.is_dm)
+        )
+        if not my_turn:
+            return
+
+        CW = ChatWidget.WIDTH
+        CH = ChatWidget.HEIGHT
+        bar_h = 60 if self.is_dm else 0   # combat bar (30) + long rest (30)
+        mode = self._combat_ui_mode
+        actions = self._get_combat_actions_for_ct(ct) if mode == "action_select" else []
+
+        if mode == "normal":
+            PANEL_H = 88
+        elif mode in ("move_select", "action_target"):
+            PANEL_H = 58
+        else:  # action_select: title + col-hdr + N rows + cancel
+            PANEL_H = max(110, 28 + 20 + len(actions) * 32 + 34)
+
+        panel = tk.Frame(self._canvas, bg=PALETTE["card2"],
+                         highlightthickness=1,
+                         highlightbackground=PALETTE["border"])
+        self._combat_actions_panel = panel
+        panel.place(x=0, rely=1.0, y=-(CH + bar_h + PANEL_H),
+                    width=CW, height=PANEL_H)
+
+        # Title row
+        from ui.widgets import hr
+        title = ("Your Turn" if ct.combatant_type == "player"
+                 else f"{ct.name}'s Turn")
+        title_row = tk.Frame(panel, bg=PALETTE["card2"], pady=3, padx=8)
+        title_row.pack(fill=tk.X)
+        tk.Label(title_row, text=f"⚔  {title}", bg=PALETTE["card2"],
+                 fg=PALETTE["fg"], font=FONTS["sub"]).pack(side=tk.LEFT)
+        hr(panel).pack(fill=tk.X)
+
+        if mode == "normal":
+            btn_row = tk.Frame(panel, bg=PALETTE["card2"])
+            btn_row.pack(fill=tk.X, padx=4, pady=4)
+            btn_row.grid_columnconfigure(0, weight=1)
+            btn_row.grid_columnconfigure(1, weight=1)
+
+            can_move = ct.can_move
+            mbtn = flat_btn(btn_row, "🦶  Move", self._combat_click_move,
+                            style="normal" if can_move else "muted")
+            mbtn.grid(row=0, column=0, sticky="ew", padx=(0, 2), ipady=4)
+            if not can_move:
+                mbtn.config(state=tk.DISABLED)
+
+            can_act = ct.can_act
+            abtn = flat_btn(btn_row, "⚔  Do Action", self._combat_click_do_action,
+                            style="normal" if can_act else "muted")
+            abtn.grid(row=0, column=1, sticky="ew", padx=(2, 0), ipady=4)
+            if not can_act:
+                abtn.config(state=tk.DISABLED)
+
+            hr(panel).pack(fill=tk.X)
+            flat_btn(panel, "Pass Turn", self._end_turn, style="ghost").pack(
+                fill=tk.X, padx=4, pady=3, ipady=2)
+
+        elif mode == "move_select":
+            tk.Label(panel, text="Click a highlighted cell to move",
+                     bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
+                     font=FONTS["small"]).pack(padx=8, pady=6, anchor="w")
+            flat_btn(panel, "Cancel", self._combat_cancel, style="muted").pack(
+                fill=tk.X, padx=4, pady=3, ipady=2)
+
+        elif mode == "action_select":
+            # Column header
+            from ui.widgets import hr as _hr
+            hdr_row = tk.Frame(panel, bg=PALETTE["bg"])
+            hdr_row.pack(fill=tk.X, padx=4)
+            hdr_row.grid_columnconfigure(0, weight=3)
+            hdr_row.grid_columnconfigure(1, weight=1)
+            hdr_row.grid_columnconfigure(2, weight=3)
+            hdr_row.grid_columnconfigure(3, weight=3)
+            for col_txt, col_i in (("Action", 0), ("Rng", 1), ("Damage", 2), ("Buffs", 3)):
+                tk.Label(hdr_row, text=col_txt, bg=PALETTE["bg"],
+                         fg=PALETTE["muted"], font=FONTS["small"],
+                         anchor="w", padx=2).grid(row=0, column=col_i, sticky="ew")
+            _hr(panel).pack(fill=tk.X)
+            inner = tk.Frame(panel, bg=PALETTE["card2"])
+            inner.pack(fill=tk.X, padx=4, pady=2)
+            for aname, scalars, adef, item_id, disabled in actions:
+                self._build_action_row(inner, ct, aname, scalars, adef, item_id, disabled)
+            _hr(panel).pack(fill=tk.X)
+            flat_btn(panel, "Cancel", self._combat_cancel, style="muted").pack(
+                fill=tk.X, padx=4, pady=3, ipady=2)
+
+        elif mode == "action_target":
+            aname = self._combat_pending_action.get("action_name", "Action")
+            tk.Label(panel, text=f"Click a target for:  {aname}",
+                     bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
+                     font=FONTS["small"]).pack(padx=8, pady=6, anchor="w")
+            flat_btn(panel, "Cancel", self._combat_cancel, style="muted").pack(
+                fill=tk.X, padx=4, pady=3, ipady=2)
+
+    def _get_combat_actions_for_ct(self, ct) -> list:
+        """Return [(name, scalars, action_def, item_id, disabled), ...] for combatant."""
+        UNARMED_SCALARS = {"Str": "A", "Dex": "B"}
+        UNARMED_ACTION = {"Range": 1, "BaseDamage": 1, "Hits": 2}
+        result = [("Unarmed Attack", UNARMED_SCALARS, UNARMED_ACTION, None, False)]
+
+        if ct.combatant_type == "player":
+            player = self.state.players.get(ct.id)
+            if player:
+                for slot_item in player.Equipment.values():
+                    if not slot_item.Actions:
+                        continue
+                    for aname, adef in slot_item.Actions.items():
+                        casts = (adef or {}).get("Casts")
+                        disabled = (casts is not None and casts.get("remaining", 0) <= 0)
+                        a_scalars = (adef or {}).get("ScalesWith")
+                        result.append((aname, a_scalars, adef, slot_item.id, disabled))
+        elif ct.combatant_type == "npc":
+            npc_cell = self.state.find_object_cell(ct.id)
+            if npc_cell:
+                npc = self.state.grid.get(npc_cell)
+                npc = npc.occupant if npc else None
+                if isinstance(npc, NPC) and npc.Actions:
+                    for aname, adef in npc.Actions.items():
+                        casts = (adef or {}).get("Casts")
+                        disabled = (casts is not None and casts.get("remaining", 0) <= 0)
+                        a_scalars = (adef or {}).get("ScalesWith") or getattr(npc, "Scalars", None)
+                        result.append((aname, a_scalars, adef, None, disabled))
+        return result
+
+    def _combat_action_display_parts(self, ct, scalars, adef) -> tuple:
+        """Return (range_str, dmg_str) for action list columns."""
+        rng = (adef or {}).get("Range", 1)
+        range_str = f"R:{rng}"
+        entity = None
+        if ct.combatant_type == "player":
+            entity = self.state.players.get(ct.id)
+        else:
+            npc_cell = self.state.find_object_cell(ct.id)
+            if npc_cell:
+                c = self.state.grid.get(npc_cell)
+                entity = c.occupant if c else None
+        if not entity:
+            return range_str, "?"
+        try:
+            dmg = calculate_damage(entity, scalars, adef)
+            hits = (adef or {}).get("Hits", 1)
+            total = dmg * hits
+            dmg_str = f"{hits}×{dmg}={total}dmg" if hits > 1 else f"{total}dmg"
+        except Exception:
+            dmg_str = "?"
+        return range_str, dmg_str
+
+    def _combat_action_damage_text(self, ct, scalars, adef) -> str:
+        r, d = self._combat_action_display_parts(ct, scalars, adef)
+        return f"{r} {d}"
+
+    @staticmethod
+    def _add_buff_tooltip(widget, buff_list) -> None:
+        """Attach a hover tooltip showing buff details to widget."""
+        tip = [None]
+
+        def _show(event):
+            if tip[0]:
+                return
+            lines = []
+            for b in buff_list:
+                name = b.get("Name", "?")
+                btype = b.get("Type", "?")
+                val = b.get("Value", 0)
+                dur = int(b.get("Duration", 0))
+                sign = "+" if val > 0 else ""
+                lines.append(name)
+                lines.append(f"  {btype}  {sign}{val}")
+                if dur < 99999:
+                    lines.append(f"  Duration: {dur} min")
+            if not lines:
+                return
+            t = tk.Toplevel(widget)
+            t.overrideredirect(True)
+            t.wm_attributes("-topmost", True)
+            t.geometry(f"+{event.x_root + 14}+{event.y_root + 14}")
+            tk.Label(t, text="\n".join(lines), bg=PALETTE["card"],
+                     fg=PALETTE["fg"], font=FONTS["small"],
+                     justify="left", padx=8, pady=6,
+                     relief=tk.SOLID, bd=1).pack()
+            tip[0] = t
+
+        def _hide(event):
+            if tip[0]:
+                try:
+                    tip[0].destroy()
+                except Exception:
+                    pass
+                tip[0] = None
+
+        widget.bind("<Enter>", _show, add=True)
+        widget.bind("<Leave>", _hide, add=True)
+
+    def _build_action_row(self, parent, ct, aname: str, scalars, adef,
+                          item_id, disabled: bool) -> tk.Frame:
+        """Build one 4-column action row (Name | R:# | DMG | Buff)."""
+        range_str, dmg_str = self._combat_action_display_parts(ct, scalars, adef)
+        gives_buffs = list((adef or {}).get("GivesBuffs") or [])
+        buff_names = [b.get("Name", "?") for b in gives_buffs if b.get("Name")]
+        buff_txt = f"Applies: {buff_names[0]}" if buff_names else ""
+
+        row_bg = PALETTE["card2"] if disabled else PALETTE["card"]
+        fg = PALETTE["fg_dim"] if disabled else PALETTE["fg"]
+
+        row = tk.Frame(parent, bg=row_bg, height=30)
+        row.pack(fill=tk.X, pady=1)
+        row.pack_propagate(False)
+        row.grid_columnconfigure(0, weight=3)
+        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(2, weight=3)
+        row.grid_columnconfigure(3, weight=3)
+
+        tk.Label(row, text=aname[:18], bg=row_bg, fg=fg,
+                 font=FONTS["small"], anchor="w", padx=2).grid(
+            row=0, column=0, sticky="ew")
+        tk.Label(row, text=range_str, bg=row_bg, fg=fg,
+                 font=FONTS["small"], anchor="w", padx=2).grid(
+            row=0, column=1, sticky="ew")
+        tk.Label(row, text=dmg_str, bg=row_bg, fg=fg,
+                 font=FONTS["small"], anchor="w", padx=2).grid(
+            row=0, column=2, sticky="ew")
+        buff_lbl = tk.Label(row, text=buff_txt[:16],
+                            bg=row_bg,
+                            fg=PALETTE["accent"] if buff_txt else PALETTE["muted"],
+                            font=FONTS["small"], anchor="w", padx=2)
+        buff_lbl.grid(row=0, column=3, sticky="ew")
+        if gives_buffs:
+            self._add_buff_tooltip(buff_lbl, gives_buffs)
+
+        if not disabled:
+            def _click(event=None, an=aname, sc=scalars, ad=adef, iid=item_id):
+                self._combat_select_action(ct, an, sc, ad, iid)
+
+            def _enter(event=None):
+                row.config(bg=PALETTE["accent"])
+                for w in row.grid_slaves():
+                    try:
+                        w.config(bg=PALETTE["accent"])
+                    except Exception:
+                        pass
+
+            def _leave(event=None):
+                row.config(bg=row_bg)
+                for w in row.grid_slaves():
+                    try:
+                        w.config(bg=row_bg)
+                    except Exception:
+                        pass
+
+            row.config(cursor="hand2")
+            row.bind("<Button-1>", _click)
+            row.bind("<Enter>", _enter)
+            row.bind("<Leave>", _leave)
+            for child in row.grid_slaves():
+                child.config(cursor="hand2")
+                child.bind("<Button-1>", _click)
+                child.bind("<Enter>", _enter)
+                child.bind("<Leave>", _leave)
+        return row
+
+    def _combat_click_move(self) -> None:
+        ct = self._current_turn()
+        if not ct or not ct.can_move:
+            return
+        self._combat_ui_mode = "move_select"
+        self._canvas.set_combat_move_mode(True)
+        self._rebuild_combat_actions_panel()
+
+    def _combat_click_do_action(self) -> None:
+        ct = self._current_turn()
+        if not ct or not ct.can_act:
+            return
+        self._combat_ui_mode = "action_select"
+        self._rebuild_combat_actions_panel()
+
+    def _combat_cancel(self) -> None:
+        self._combat_ui_mode = "normal"
+        self._canvas.set_combat_move_mode(False)
+        self._canvas.set_combat_action(None, set())
+        self._rebuild_combat_actions_panel()
+
+    def _combat_do_move(self, gx: int, gy: int) -> None:
+        ct = self._current_turn()
+        if not ct:
+            return
+        if ct.combatant_type == "player" and ct.id == self.local_uuid:
+            self._send({"type": "PLAYER_MOVE", "target_cell": [gx, gy]})
+        elif ct.combatant_type == "npc" and self.is_dm:
+            self._send({"type": "DM_NPC_MOVE", "npc_id": ct.id,
+                        "target_cell": [gx, gy]})
+        self._canvas.set_combat_move_mode(False)
+        self._combat_ui_mode = "normal"
+        self._rebuild_combat_actions_panel()
+
+    def _combat_select_action(self, ct, action_name: str, scalars, adef,
+                              item_id: Optional[str]) -> None:
+        action_range = (adef or {}).get("Range", 1)
+
+        if ct.combatant_type == "player":
+            pc = self._canvas._player_cell()
+            if not pc:
+                return
+            if action_range == 0:
+                self._send({"type": "PLAYER_ACTION", "action_name": action_name,
+                             "item_id": item_id, "target_id": self.local_uuid,
+                             "target_cell": list(pc)})
+                self._combat_ui_mode = "normal"
+                self._rebuild_combat_actions_panel()
+                return
+            if action_range == 1:
+                targets = {(pc[0]+dx, pc[1]+dy)
+                           for dx, dy in ((0,1),(0,-1),(1,0),(-1,0))}
+            else:
+                targets = cells_in_range(pc, action_range, self.state,
+                                         self.state.settings.los_max_distance)
+            self._combat_pending_action = {"action_name": action_name,
+                                           "item_id": item_id}
+            self._combat_ui_mode = "action_target"
+            self._canvas.set_combat_action(self._combat_pending_action, targets)
+
+        elif ct.combatant_type == "npc" and self.is_dm:
+            npc_cell = self.state.find_object_cell(ct.id)
+            if not npc_cell:
+                return
+            if action_range <= 1:
+                targets = {(npc_cell[0]+dx, npc_cell[1]+dy)
+                           for dx, dy in ((0,1),(0,-1),(1,0),(-1,0))}
+            else:
+                targets = cells_in_range(npc_cell, action_range, self.state,
+                                         self.state.settings.los_max_distance)
+
+            def _on_target(tx, ty):
+                tc = self.state.grid.get((tx, ty))
+                target_obj = tc.occupant if tc else None
+                target_p = next(
+                    (p for p in self.state.players.values()
+                     if self.state.find_player_cell(p.id) == (tx, ty)), None)
+                tid = ""
+                if isinstance(target_obj, NPC):
+                    tid = target_obj.id
+                elif target_p:
+                    tid = target_p.id
+                self._send({"type": "DM_NPC_ACTION", "npc_id": ct.id,
+                             "action_name": action_name, "target_id": tid,
+                             "target_cell": [tx, ty]})
+
+            self._combat_pending_action = {"action_name": action_name,
+                                           "npc_id": ct.id, "_on_target": _on_target}
+            self._combat_ui_mode = "action_target"
+            self._canvas.set_combat_action(self._combat_pending_action, targets)
+
+        self._rebuild_combat_actions_panel()
 
     def _pc_item_ground_menu(self, gx: int, gy: int, item: Item) -> None:
         """Pick-up/inspect menu shown when PC is standing on an Item tile."""
@@ -704,6 +1171,34 @@ class GameScreen(tk.Frame):
         from dialogs.object_tooltip import ObjectTooltip
         ObjectTooltip(self.winfo_toplevel(), obj)
 
+    def _is_interaction_active(self) -> bool:
+        """True when a blocking interaction panel (Door/Stairs) is still open."""
+        try:
+            return (self._interaction_panel is not None
+                    and not self._interaction_panel._closing
+                    and self._interaction_panel.winfo_exists())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _show_disconnected_notice(root) -> None:
+        """Create a top-centre notice panel on whatever screen is now showing."""
+        try:
+            from ui.panel import Panel
+            from ui.widgets import flat_btn
+            panel = Panel(root, padx=28, pady=22, placement="top")
+            tk.Label(panel, text="Disconnected from server",
+                     bg=PALETTE["card"], fg=PALETTE["fg"],
+                     font=FONTS["heading"]).pack(anchor="w", pady=(0, 10))
+            tk.Label(panel,
+                     text="The connection to the server was lost.",
+                     bg=PALETTE["card"], fg=PALETTE["fg_dim"],
+                     font=FONTS["body"]).pack(anchor="w", pady=(0, 16))
+            flat_btn(panel, "Close", panel.close, style="ghost").pack(
+                fill=tk.X, ipady=4)
+        except Exception:
+            pass
+
     def _show_stair_prompt(self, stair, cell) -> None:
         from dialogs.stair_dialog import StairPromptDialog
 
@@ -711,7 +1206,49 @@ class GameScreen(tk.Frame):
             if stair.LinkedStair:
                 self._send({"type": "PLAYER_TAKE_STAIRS", "stair_id": stair.id})
 
-        StairPromptDialog(self._canvas, stair, on_yes=_yes, on_no=lambda: None)
+        prompt = StairPromptDialog(self._canvas, stair, on_yes=_yes, on_no=lambda: None)
+        self._interaction_panel = prompt
+
+    def _dm_speak_as_npc(self, npc: NPC) -> None:
+        """Open an in-app panel letting the DM send a message as the given NPC."""
+        from ui.panel import Panel
+        from ui.widgets import hr
+        panel = Panel(self.winfo_toplevel(), padx=0, pady=0)
+
+        hdr = tk.Frame(panel, bg=PALETTE["card"], padx=14, pady=10)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text=f"Speak as {npc.Name}", bg=PALETTE["card"],
+                 fg=PALETTE["fg"], font=FONTS["heading"]).pack(side=tk.LEFT)
+        flat_btn(hdr, "✕", panel.close, style="ghost").pack(side=tk.RIGHT)
+        hr(panel).pack(fill=tk.X)
+
+        body = tk.Frame(panel, bg=PALETTE["card"], padx=14, pady=10)
+        body.pack(fill=tk.X)
+        tk.Label(body, text="Message", bg=PALETTE["card"],
+                 fg=PALETTE["fg_dim"], font=FONTS["small"]).pack(anchor="w", pady=(0, 4))
+        msg_text = tk.Text(body, height=3, width=32,
+                           bg=PALETTE["card2"], fg=PALETTE["fg"],
+                           insertbackground=PALETTE["fg"],
+                           relief=tk.FLAT, bd=0)
+        msg_text.pack(fill=tk.X)
+
+        hr(panel).pack(fill=tk.X)
+        btn_row = tk.Frame(panel, bg=PALETTE["card"], padx=14, pady=8)
+        btn_row.pack(fill=tk.X)
+
+        def _send():
+            content = msg_text.get("1.0", "end-1c").strip()
+            if content:
+                self._send({"type": "DM_CHAT_AS_NPC",
+                            "npc_id": npc.id,
+                            "content": content,
+                            "msg_type": "normal"})
+            panel.close()
+
+        flat_btn(btn_row, "Send", _send, style="normal").pack(side=tk.LEFT, padx=(0, 8))
+        flat_btn(btn_row, "Cancel", panel.close, style="ghost").pack(side=tk.LEFT)
+        msg_text.focus_set()
+        panel.bind("<Return>", lambda e: _send() if not (e.state & 1) else None)
 
     def _dm_modify_stairs(self, stair, cell) -> None:
         from dialogs.stair_dialog import StairModifyDialog
@@ -833,6 +1370,10 @@ class GameScreen(tk.Frame):
                                      {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
 
             if isinstance(obj, NPC) and not is_protected:
+                menu.add_command(
+                    label="Modify Current HP",
+                    command=lambda: self._modify_npc_hp(gx, gy))
+                menu.add_separator()
                 enc_ids = self.state.combat.encounter_npc_ids if self.state.combat else []
                 if obj.id in enc_ids:
                     menu.add_command(
@@ -852,12 +1393,14 @@ class GameScreen(tk.Frame):
                             label=aname,
                             command=lambda a=aname: self._dm_npc_target_select(obj, a))
                 menu.add_cascade(label="Actions", menu=npc_action_menu)
+                menu.add_command(label="Speak as NPC…",
+                                 command=lambda _o=obj: self._dm_speak_as_npc(_o))
 
         elif not is_protected:
-            # Unoccupied ground — spawn options (item 3: no Wall, add Door)
+            # Unoccupied ground — spawn options
             import uuid as _uuid_mod
             menu.add_command(label="Spawn Object",
-                             command=lambda: self._dm_spawn(gx, gy))
+                             command=lambda: self._spawn_from_prefabs(gx, gy))
             menu.add_command(
                 label="Spawn Door",
                 command=lambda: self._send({
@@ -874,12 +1417,6 @@ class GameScreen(tk.Frame):
                                "Name": "Stairs", "Direction": "Up", "LinkedStair": ""}
                 })
             )
-            if self.prefabs:
-                menu.add_separator()
-                menu.add_command(
-                    label="Spawn Prefab…",
-                    command=lambda: self._open_spawn_prefab(gx, gy)
-                )
 
         if uuids:
             menu.add_separator()
@@ -922,6 +1459,100 @@ class GameScreen(tk.Frame):
 
         SpawnPrefabDialog(self.winfo_toplevel(), self.prefabs, on_spawn=_do_spawn)
 
+    def _modify_npc_hp(self, gx: int, gy: int) -> None:
+        """In-game panel: DM enters +/- delta to adjust an NPC's Current HP."""
+        cell = self.state.grid.get((gx, gy))
+        if not cell or not isinstance(cell.occupant, NPC):
+            return
+        npc = cell.occupant
+
+        from ui.panel import Panel
+        panel = Panel(self.winfo_toplevel(), padx=28, pady=20)
+
+        tk.Label(panel, text=f"Modify HP — {npc.Name}",
+                 bg=PALETTE["card"], fg=PALETTE["fg"],
+                 font=FONTS["heading"]).pack(anchor="w", pady=(0, 6))
+        tk.Label(panel, text=f"Current:  {npc.CurrentHP} / {npc.MaximumHP}",
+                 bg=PALETTE["card"], fg=PALETTE["fg_dim"],
+                 font=FONTS["body"]).pack(anchor="w", pady=(0, 12))
+
+        entry_row = tk.Frame(panel, bg=PALETTE["card"])
+        entry_row.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(entry_row, text="Amount (+/−)", bg=PALETTE["card"],
+                 fg=PALETTE["fg"], font=FONTS["body"]).pack(side=tk.LEFT, padx=(0, 10))
+        delta_var = tk.StringVar(value="0")
+        delta_entry = tk.Entry(entry_row, textvariable=delta_var,
+                               bg=PALETTE["card2"], fg=PALETTE["fg"],
+                               insertbackground=PALETTE["fg"],
+                               relief=tk.FLAT, font=FONTS["body"], width=8)
+        delta_entry.pack(side=tk.LEFT)
+        delta_entry.focus_set()
+        delta_entry.select_range(0, tk.END)
+
+        err_var = tk.StringVar()
+        tk.Label(panel, textvariable=err_var, bg=PALETTE["card"],
+                 fg=PALETTE["danger"], font=FONTS["small"]).pack(pady=(0, 4))
+
+        btn_row = tk.Frame(panel, bg=PALETTE["card"])
+        btn_row.pack(anchor="e")
+
+        def _confirm():
+            try:
+                delta = int(delta_var.get())
+            except ValueError:
+                err_var.set("Enter a whole number, e.g. −5 or +10")
+                return
+            # Read fresh state in case NPC was modified since menu opened
+            fresh_cell = self.state.grid.get((gx, gy))
+            if not fresh_cell or not isinstance(fresh_cell.occupant, NPC):
+                panel.close()
+                return
+            fresh_npc = fresh_cell.occupant
+            new_hp = fresh_npc.CurrentHP + delta
+            panel.close()
+            if new_hp <= 0:
+                # Treat as kill — same path as combat death
+                self._send({"type": "DM_DELETE_OBJECT", "cell": [gx, gy]})
+            else:
+                new_hp = min(fresh_npc.MaximumHP, new_hp)
+                updated = dict(fresh_npc.to_dict())
+                updated["CurrentHP"] = new_hp
+                self._send({"type": "DM_MODIFY_OBJECT",
+                            "cell": [gx, gy], "object": updated})
+
+        delta_entry.bind("<Return>", lambda e: _confirm())
+        flat_btn(btn_row, "Confirm", _confirm, style="normal").pack(
+            side=tk.LEFT, padx=(0, 8), ipadx=6)
+        flat_btn(btn_row, "Cancel", panel.close, style="ghost").pack(side=tk.LEFT)
+
+    def _spawn_from_prefabs(self, gx: int, gy: int) -> None:
+        """Open the prefab-picker dialog and spawn the selected object."""
+        from dialogs.spawn_from_prefabs_dialog import SpawnFromPrefabsDialog
+        spawnable = [p for p in self.prefabs if p.get("type") in ("NPC", "Item")]
+        if not spawnable:
+            from ui.panel import Panel
+            panel = Panel(self.winfo_toplevel(), padx=28, pady=22)
+            tk.Label(panel, text="No Prefabs Loaded", bg=PALETTE["card"],
+                     fg=PALETTE["fg"], font=FONTS["heading"]).pack(anchor="w", pady=(0, 8))
+            tk.Label(panel,
+                     text=(
+                         "No NPC or Item prefabs are loaded.\n"
+                         "Use the DM Workshop or ESC → Prefab Objects\n"
+                         "to create some first."),
+                     bg=PALETTE["card"], fg=PALETTE["fg"], font=FONTS["body"],
+                     justify="left").pack(anchor="w", pady=(0, 16))
+            flat_btn(panel, "OK", panel.close, style="normal").pack(fill=tk.X, ipady=4)
+            return
+        SpawnFromPrefabsDialog(
+            self.winfo_toplevel(),
+            prefabs=spawnable,
+            on_spawn=lambda obj_d: self._send({
+                "type": "DM_SPAWN_OBJECT",
+                "cell": [gx, gy],
+                "object": obj_d,
+            }),
+        )
+
     def _dm_spawn(self, gx, gy) -> None:
         from dialogs.spawn_object_dialog import SpawnObjectDialog
 
@@ -958,6 +1589,7 @@ class GameScreen(tk.Frame):
                 "player_uuid": player_uuid,
                 "patch": {"Stats": s},
             }),
+            multiplier=self.state.settings.hp_base_multiplier,
         )
 
     def _dm_player_options(self, player_uuid: str, player: PlayerObject) -> None:
@@ -1055,6 +1687,9 @@ class GameScreen(tk.Frame):
                  lambda: (_close(), self._go_main_menu()),
                  style="ghost").pack(fill=tk.X, pady=3, ipady=3)
         if self.is_dm:
+            flat_btn(panel, "Prefab Objects",
+                     lambda: (_close(), self._open_ingame_prefab_builder()),
+                     style="ghost").pack(fill=tk.X, pady=3, ipady=3)
             flat_btn(panel, "Game Settings",
                      lambda: (_close(), self._open_game_settings()),
                      style="ghost").pack(fill=tk.X, pady=3, ipady=3)
@@ -1066,6 +1701,139 @@ class GameScreen(tk.Frame):
                  style="danger").pack(fill=tk.X, pady=3, ipady=3)
         flat_btn(panel, "Cancel", _close,
                  style="muted").pack(fill=tk.X, pady=(10, 0), ipady=3)
+
+    def _open_ingame_prefab_builder(self) -> None:
+        """Full-window overlay: browse/add session prefabs without touching disk."""
+        import uuid as _uuid
+        from app.constants import FONTS as _F
+        from ui.widgets import flat_btn as _btn, hr as _hr
+        from screens.dm_tool import _EmbeddedSpawnForm, _COLS
+
+        root = self.winfo_toplevel()
+        # Working copy — Confirm commits it; Discard throws it away
+        temp = list(self.prefabs)
+
+        overlay = tk.Frame(root, bg=PALETTE["bg"])
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+        # ── Header ───────────────────────────────────────────────────────────
+        hdr = tk.Frame(overlay, bg=PALETTE["card2"], height=44)
+        hdr.pack(side=tk.TOP, fill=tk.X)
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="Session Prefab Objects",
+                 bg=PALETTE["card2"], fg=PALETTE["fg"],
+                 font=_F["heading"], padx=20).pack(side=tk.LEFT, pady=6)
+
+        # ── Bottom bar (before content so expand fills middle) ────────────────
+        tk.Frame(overlay, bg=PALETTE["border"], height=1).pack(side=tk.BOTTOM, fill=tk.X)
+        bar = tk.Frame(overlay, bg=PALETTE["card2"], height=54)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        bar.pack_propagate(False)
+        bf = tk.Frame(bar, bg=PALETTE["card2"])
+        bf.pack(side=tk.RIGHT, padx=20, pady=8)
+
+        def _confirm():
+            self.prefabs[:] = temp
+            overlay.destroy()
+
+        def _discard():
+            overlay.destroy()
+
+        _btn(bf, "✓  Confirm Changes", _confirm, style="success").pack(
+            side=tk.LEFT, padx=(0, 12), ipadx=8, ipady=4)
+        _btn(bf, "✕  Discard Changes", _discard, style="danger").pack(
+            side=tk.LEFT, ipadx=8, ipady=4)
+
+        # ── Content ───────────────────────────────────────────────────────────
+        content = tk.Frame(overlay, bg=PALETTE["bg"])
+        content.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=10)
+
+        left = tk.Frame(content, bg=PALETTE["card"],
+                        highlightthickness=1, highlightbackground=PALETTE["border"])
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+
+        right = tk.Frame(content, bg=PALETTE["card"],
+                         highlightthickness=1, highlightbackground=PALETTE["border"])
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+
+        # ── Left: spawn form using session objects ────────────────────────────
+        tk.Label(left, text="Add Object to Prefabs",
+                 bg=PALETTE["card"], fg=PALETTE["fg"],
+                 font=_F["heading"], padx=14, pady=10).pack(anchor="w")
+        tk.Frame(left, bg=PALETTE["border"], height=1).pack(fill=tk.X)
+
+        def _on_add(obj_dict):
+            obj_dict["id"] = str(_uuid.uuid4())
+            temp.append(obj_dict)
+            _refresh()
+
+        form = _EmbeddedSpawnForm(
+            left, on_add=_on_add,
+            get_session_objects=lambda: temp)
+        form.pack(fill=tk.BOTH, expand=True)
+
+        # ── Right: live table of temp prefabs ─────────────────────────────────
+        tk.Label(right, text="Prefab Objects",
+                 bg=PALETTE["card"], fg=PALETTE["fg"],
+                 font=_F["heading"], padx=14, pady=10).pack(anchor="w")
+        tk.Frame(right, bg=PALETTE["border"], height=1).pack(fill=tk.X)
+
+        col_hdr = tk.Frame(right, bg=PALETTE["bg"], padx=6, pady=5)
+        col_hdr.pack(fill=tk.X)
+        for col, w in _COLS:
+            tk.Label(col_hdr, text=col, bg=PALETTE["bg"],
+                     fg="#ffffff", font=_F["form_label"],
+                     width=w, anchor="w").pack(side=tk.LEFT, padx=2)
+        tk.Label(col_hdr, text="", bg=PALETTE["bg"], width=3).pack(side=tk.LEFT)
+
+        list_outer = tk.Frame(right, bg=PALETTE["card"])
+        list_outer.pack(fill=tk.BOTH, expand=True)
+        vsb = tk.Scrollbar(list_outer, bg=PALETTE["card2"],
+                           troughcolor=PALETTE["bg"], width=6)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 2))
+        tbl_canvas = tk.Canvas(list_outer, bg=PALETTE["card"],
+                               highlightthickness=0, yscrollcommand=vsb.set)
+        tbl_canvas.pack(fill=tk.BOTH, expand=True)
+        vsb.config(command=tbl_canvas.yview)
+        tbl_inner = tk.Frame(tbl_canvas, bg=PALETTE["card"])
+        _win = tbl_canvas.create_window((0, 0), window=tbl_inner, anchor="nw")
+        tbl_inner.bind("<Configure>",
+                       lambda e: tbl_canvas.configure(
+                           scrollregion=tbl_canvas.bbox("all")))
+        tbl_canvas.bind("<Configure>",
+                        lambda e: tbl_canvas.itemconfig(_win, width=e.width - 8))
+
+        def _refresh():
+            for w in tbl_inner.winfo_children():
+                w.destroy()
+            if not temp:
+                tk.Label(tbl_inner, text="No objects added yet.",
+                         bg=PALETTE["card"], fg=PALETTE["muted"],
+                         font=_F["body"], pady=20).pack()
+                return
+            for i, obj in enumerate(temp):
+                bg = PALETTE["card2"] if i % 2 == 0 else PALETTE["card"]
+                row = tk.Frame(tbl_inner, bg=bg, cursor="hand2", pady=4)
+                row.pack(fill=tk.X)
+                col_vals = {
+                    "name":        str(obj.get("Name", obj.get("type", "?")))[:18],
+                    "type":        str(obj.get("type", "?"))[:8],
+                    "description": str(obj.get("Description", ""))[:24],
+                }
+                for col_t, w in _COLS:
+                    tk.Label(row, text=col_vals.get(col_t.lower(), ""),
+                             bg=bg, fg=PALETTE["fg"], font=_F["body"],
+                             width=w, anchor="w", padx=6).pack(side=tk.LEFT)
+                def _del(idx=i):
+                    temp.pop(idx)
+                    _refresh()
+                tk.Button(row, text="×", command=_del,
+                          bg=PALETTE["danger"], fg="#fff",
+                          relief=tk.FLAT, font=_F["small"],
+                          cursor="hand2", padx=4).pack(side=tk.RIGHT, padx=4)
+
+        _refresh()
 
     def _open_game_settings(self) -> None:
         from ui.widgets import styled_entry

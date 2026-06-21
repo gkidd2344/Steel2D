@@ -2,12 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Union
 
-from game.objects import NPC, Item, Door, Wall, PlayerObject, occupant_from_dict
+from game.objects import NPC, Item, Door, Wall, Stairs, PlayerObject, occupant_from_dict
 
 
 @dataclass
 class GameSettings:
-    hp_base_multiplier: float = 6.0
+    hp_base_multiplier: float = 4.0
     enemy_damage_multiplier: float = 1.0
     los_max_distance: int = 20
 
@@ -21,7 +21,7 @@ class GameSettings:
     @classmethod
     def from_dict(cls, d: dict) -> "GameSettings":
         return cls(
-            hp_base_multiplier=float(d.get("hp_base_multiplier", 6.0)),
+            hp_base_multiplier=float(d.get("hp_base_multiplier", 4.0)),
             enemy_damage_multiplier=float(d.get("enemy_damage_multiplier", 1.0)),
             los_max_distance=int(d.get("los_max_distance", 20)),
         )
@@ -52,9 +52,45 @@ class Cell:
         )
 
 
-MOVE_COST   = 1.5   # points per movement
-ACTION_COST = 2.0   # points per action
-TURN_THRESHOLD = 3.0  # auto-end when points_spent >= this
+MOVE_COST         = 1.0   # points per movement
+ACTION_COST       = 1.0   # points per action
+TURN_THRESHOLD    = 1.0   # auto-end when points_spent >= this
+COMBAT_MOVE_RANGE = 5     # max tiles a combatant may travel per Move action
+# Future multi-action turns: raise TURN_THRESHOLD without changing costs
+
+
+def find_combat_move_cells(state: "GameState", from_cell: Tuple[int, int]) -> set:
+    """BFS: all cells reachable within COMBAT_MOVE_RANGE orthogonal steps.
+
+    Uses the same walkability rules as real-time PLAYER_MOVE (NPC/Wall/closed
+    Door block; Item and Stairs are passable/landable).
+    """
+    from collections import deque
+    visited: set = {from_cell}
+    q = deque([(from_cell, 0)])
+    reachable: set = set()
+    while q:
+        pos, dist = q.popleft()
+        if dist >= COMBAT_MOVE_RANGE:
+            continue
+        cx, cy = pos
+        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            npos = (cx + dx, cy + dy)
+            if npos in visited:
+                continue
+            visited.add(npos)
+            tc = state.grid.get(npos)
+            if not tc or not tc.walkable:
+                continue
+            occ = tc.occupant
+            if occ and not isinstance(occ, (Item, Stairs)):
+                if isinstance(occ, (NPC, Wall)):
+                    continue
+                if isinstance(occ, Door) and not occ.Open:
+                    continue
+            reachable.add(npos)
+            q.append((npos, dist + 1))
+    return reachable
 
 
 @dataclass

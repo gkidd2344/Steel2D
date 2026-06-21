@@ -8,7 +8,7 @@ from ui.widgets import flat_btn
 
 class DoorInteractionDialog(Panel):
     def __init__(self, parent, door: Door, on_action: Callable):
-        super().__init__(parent, padx=28, pady=20)
+        super().__init__(parent, padx=28, pady=20, placement="top")
         self._door = door
         self._on_action = on_action
         self._build()

@@ -223,6 +223,8 @@ class SpawnObjectDialog(Panel):
             cb.pack(side=tk.LEFT)
             cb.bind("<<ComboboxSelected>>", lambda e: self._recalc_npc_hp())
         self._field_row(gen, "Size", _size_row)
+        # Write trace fires when _pre_fill programmatically sets the size
+        self._npc_size.trace_add("write", lambda *_: self._recalc_npc_hp())
 
         def _hostile_row(p):
             tk.Checkbutton(p, variable=self._npc_hostile,
@@ -234,25 +236,42 @@ class SpawnObjectDialog(Panel):
             self._spinbox(p, self._npc_turns_allowed, 1, 10, w=4).pack(side=tk.LEFT)
         self._field_row(gen, "Turns Allowed", _turns_row)
 
-        # Current HP BEFORE Maximum HP
-        def _curhp_row(p):
-            self._spinbox(p, self._npc_curhp, 1, 99999, w=8).pack(side=tk.LEFT)
-        self._field_row(gen, "Current HP", _curhp_row)
+        # Current HP is intentionally not shown here.
+        # Use the right-click "Modify Current HP" option on a spawned NPC.
 
+        # Max HP — always readonly, auto-calculated from Size + Con formula
         def _maxhp_row(p):
-            self._spinbox(p, self._npc_maxhp, 1, 99999, w=8).pack(side=tk.LEFT)
-        self._field_row(gen, "Maximum HP", _maxhp_row)
+            self._npc_maxhp_disp = tk.StringVar(value="—")
+            tk.Label(p, textvariable=self._npc_maxhp_disp,
+                     bg=PALETTE["card"], fg="#e6e6f0",
+                     font=FONTS["body"]).pack(side=tk.LEFT)
+            tk.Label(p, text="  (auto · Size + Con)",
+                     bg=PALETTE["card"], fg=PALETTE["muted"],
+                     font=FONTS["small"]).pack(side=tk.LEFT)
+        self._field_row(gen, "Max HP", _maxhp_row)
 
         # ── Stats ─────────────────────────────────────────────────────────────
         _, stats_sec = self._make_section(self._body_frame, "Stats", expanded=False)
 
         for k in STAT_KEYS:
             def _stat_row(p, _k=k):
-                sp = self._spinbox(p, self._npc_stats[_k], 0, 9999, w=6,
-                                   command=self._validate_npc_stats)
-                sp.pack(side=tk.LEFT)
-                self._npc_stats[_k].trace_add("write",
-                                               lambda *_: self._validate_npc_stats())
+                # Con changes must also recalculate Max HP
+                if _k == "Con":
+                    def _con_cmd():
+                        self._validate_npc_stats()
+                        self._recalc_npc_hp()
+                    sp = self._spinbox(p, self._npc_stats[_k], 0, 9999, w=6,
+                                       command=_con_cmd)
+                    sp.pack(side=tk.LEFT)
+                    self._npc_stats[_k].trace_add("write",
+                                                   lambda *_: (self._validate_npc_stats(),
+                                                                self._recalc_npc_hp()))
+                else:
+                    sp = self._spinbox(p, self._npc_stats[_k], 0, 9999, w=6,
+                                       command=self._validate_npc_stats)
+                    sp.pack(side=tk.LEFT)
+                    self._npc_stats[_k].trace_add("write",
+                                                   lambda *_: self._validate_npc_stats())
             self._field_row(stats_sec, k, _stat_row)
 
         tk.Label(stats_sec, textvariable=self._npc_stat_warn,
@@ -266,13 +285,6 @@ class SpawnObjectDialog(Panel):
         self._action_frame.pack(fill=tk.X)
         self._build_action_buttons(act_sec)
 
-        if not self._existing:
-            self._add_action_row(preset={
-                "name": "Unarmed Attack",
-                "desc": "A basic unarmed strike using Str.",
-                "range": 1, "damage": 0, "hits": 1,
-            })
-
         self._recalc_npc_hp()
         self._validate_npc_stats()
 
@@ -281,12 +293,17 @@ class SpawnObjectDialog(Panel):
             return
         try:
             level = self._npc_level.get()
-            size = self._npc_size.get()
-            con = self._npc_stats.get("Con", tk.IntVar()).get()
-            mult = self._settings.hp_base_multiplier if self._settings else 6.0
-            hp = calc_max_hp(size, level, con, mult)
+            size  = self._npc_size.get()
+            con   = self._npc_stats.get("Con", tk.IntVar()).get()
+            mult  = self._settings.hp_base_multiplier if self._settings else 4.0
+            hp    = calc_max_hp(size, level, con, mult)
             self._npc_maxhp.set(hp)
-            self._npc_curhp.set(hp)
+            # Update readonly display label
+            if hasattr(self, "_npc_maxhp_disp"):
+                self._npc_maxhp_disp.set(str(hp))
+            # Current HP tracks Max HP only for new objects (not modify mode)
+            if not self._existing:
+                self._npc_curhp.set(hp)
         except Exception:
             pass
         self._validate_npc_stats()
@@ -337,7 +354,6 @@ class SpawnObjectDialog(Panel):
         self._item_desc.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         for label, var, mn, mx in [
-            ("Level",    self._item_level,    1, 99),
             ("Quantity", self._item_quantity, 1, 9999),
             ("Value (g)", self._item_value,   0, 999999),
         ]:
@@ -356,18 +372,6 @@ class SpawnObjectDialog(Panel):
             ttk.Combobox(p, textvariable=self._item_slot,
                          values=slot_opts, state="readonly", width=16).pack(side=tk.LEFT)
         self._field_row(gen, "Equipment Slot", _slot_row)
-
-        # ── Scalars ───────────────────────────────────────────────────────────
-        _, sc_sec = self._make_section(self._body_frame, "Scalars", expanded=False)
-        self._item_scalar_vars = {}
-        for k in STAT_KEYS:
-            v = tk.StringVar(value="")
-            self._item_scalar_vars[k] = v
-            def _sc_row(p, _k=k, _v=v):
-                ttk.Combobox(p, textvariable=_v,
-                             values=[""] + list(SCALAR_WEIGHT_LOOKUP.keys()),
-                             state="readonly", width=8).pack(side=tk.LEFT, padx=4)
-            self._field_row(sc_sec, k, _sc_row)
 
         # ── Stat Modifiers ────────────────────────────────────────────────────
         _, sm_sec = self._make_section(self._body_frame, "Stat Modifiers",
@@ -417,17 +421,31 @@ class SpawnObjectDialog(Panel):
     def _build_action_buttons(self, parent: tk.Frame) -> None:
         btn_row = tk.Frame(parent, bg=PALETTE["card"])
         btn_row.pack(anchor="w", pady=(6, 0))
-        flat_btn(btn_row, "+  New Action", self._add_action_row,
-                 style="ghost").pack(side=tk.LEFT, padx=(0, 6))
-        flat_btn(btn_row, "+  Prefab Action", self._pick_prefab_action,
-                 style="muted").pack(side=tk.LEFT)
+        flat_btn(btn_row, "+Action", self._pick_prefab_action,
+                 style="ghost").pack(side=tk.LEFT)
 
     def _pick_prefab_action(self) -> None:
-        action_prefabs = [p for p in self._prefabs if p.get("type") == "Action"]
+        # Merge session objects (DM Workshop table) + loaded prefabs
+        get_sess = getattr(self, "_get_session_objects", None)
+        sess_actions = [p for p in (get_sess() if get_sess else [])
+                        if p.get("type") == "Action"]
+        prefab_actions = [p for p in self._prefabs if p.get("type") == "Action"]
+        seen = {a.get("Name", "") for a in sess_actions}
+        action_prefabs = sess_actions + [p for p in prefab_actions
+                                          if p.get("Name", "") not in seen]
         if not action_prefabs:
-            from tkinter import messagebox
-            messagebox.showinfo("No Action Prefabs",
-                                "No Action-type prefabs are loaded.")
+            from ui.panel import Panel
+            _p = Panel(self, padx=24, pady=18)
+            import tkinter as _tk
+            _tk.Label(_p, text="No Action Prefabs", bg=PALETTE["card"],
+                      fg=PALETTE["fg"], font=FONTS["heading"]).pack(anchor="w", pady=(0, 8))
+            _tk.Label(_p,
+                      text="No Action-type prefabs are loaded.\n"
+                           "Create one in the DM Workshop or\n"
+                           "ESC → Prefab Objects first.",
+                      bg=PALETTE["card"], fg=PALETTE["fg"], font=FONTS["body"],
+                      justify="left").pack(anchor="w", pady=(0, 14))
+            flat_btn(_p, "OK", _p.close, style="normal").pack(fill=_tk.X, ipady=3)
             return
 
         def _on_select(action_dict: dict) -> None:
@@ -648,22 +666,23 @@ class SpawnObjectDialog(Panel):
             self._npc_name.set(obj.Name)
             if self._npc_desc:
                 self._npc_desc.insert("1.0", obj.Description)
-            self._npc_level.set(obj.Level)
-            self._npc_size.set(obj.Size)
-            self._npc_hostile.set(obj.Hostile)
-            self._npc_maxhp.set(obj.MaximumHP)
-            self._npc_curhp.set(obj.CurrentHP)
-            self._npc_turns_allowed.set(max(1, getattr(obj, "TurnsAllowed", 1)))
+            # Set stats first so Con is ready when Level/Size trigger _recalc_npc_hp
             for k in STAT_KEYS:
                 if k in self._npc_stats:
                     self._npc_stats[k].set(obj.Stats.get(k, 0))
+            self._npc_level.set(obj.Level)
+            self._npc_size.set(obj.Size)
+            self._npc_hostile.set(obj.Hostile)
+            self._npc_curhp.set(obj.CurrentHP)   # preserved for result dict
+            self._npc_turns_allowed.set(max(1, getattr(obj, "TurnsAllowed", 1)))
             if obj.Actions:
                 self._fill_actions(obj.Actions)
+            # Recalculate after all values are set so MaxHP display is correct
+            self._recalc_npc_hp()
         elif isinstance(obj, Item):
             self._item_name.set(obj.Name)
             if self._item_desc:
                 self._item_desc.insert("1.0", obj.Description)
-            self._item_level.set(obj.Level)
             self._item_consumable.set(obj.Consumable)
             self._item_quantity.set(obj.Quantity)
             self._item_value.set(obj.Value)
@@ -674,10 +693,7 @@ class SpawnObjectDialog(Panel):
                 for k, v in obj.Stats.items():
                     if k in self._item_stat_vars:
                         self._item_stat_vars[k].set(v)
-            if obj.Scalars:
-                for k, v in obj.Scalars.items():
-                    if k in self._item_scalar_vars:
-                        self._item_scalar_vars[k].set(v)
+            # Scalars ignored — Items no longer support item-level Scalars
             if obj.Actions:
                 self._fill_actions(obj.Actions)
 
@@ -752,7 +768,9 @@ class SpawnObjectDialog(Panel):
                 "Size":         self._npc_size.get(),
                 "Hostile":      self._npc_hostile.get(),
                 "MaximumHP":    self._npc_maxhp.get(),
-                "CurrentHP":    self._npc_curhp.get(),
+                # CurrentHP = MaxHP for new objects; editable only in modify mode
+                "CurrentHP":    (self._npc_curhp.get() if self._existing
+                                 else self._npc_maxhp.get()),
                 "Stats":        {k: v.get() for k, v in self._npc_stats.items()},
                 "Actions":      self._collect_actions(),
                 "TurnsAllowed": max(1, self._npc_turns_allowed.get()),
@@ -771,18 +789,16 @@ class SpawnObjectDialog(Panel):
                     pass
             stats_raw = {k: v.get() for k, v in self._item_stat_vars.items()
                          if v.get() != 0}
-            scalars_raw = {k: v.get() for k, v in self._item_scalar_vars.items()
-                           if v.get()}
             return {
                 "type": "Item", "id": str(_uuid.uuid4()),
                 "Name":         name,
                 "Description":  self._item_desc.get("1.0", "end-1c") if self._item_desc else "",
-                "Level":        self._item_level.get(),
+                "Level":        1,   # Items no longer have a Level field
                 "Consumable":   self._item_consumable.get(),
                 "Quantity":     self._item_quantity.get(),
                 "Value":        self._item_value.get(),
                 "Stats":        stats_raw if stats_raw else None,
-                "Scalars":      scalars_raw if scalars_raw else None,
+                "Scalars":      None,   # Scalars removed from Items
                 "Actions":      self._collect_actions(),
                 "EquipmentSlot": slot,
             }

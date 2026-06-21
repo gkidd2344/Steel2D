@@ -56,6 +56,8 @@ class GameCanvas(tk.Canvas):
 
         self._combat_action: Optional[dict] = None
         self._valid_targets: Set[Tuple[int, int]] = set()
+        self._combat_move_mode: bool = False
+        self._combat_valid_moves: Set[Tuple[int, int]] = set()
 
         self._hover_cell: Optional[Tuple[int, int]] = None
         self._img_cache: Dict[Tuple, object] = {}
@@ -113,36 +115,43 @@ class GameCanvas(tk.Canvas):
 
     def add_bubble(self, msg: dict) -> None:
         sender = msg.get("sender_uuid", "")
+        text   = msg.get("content", "")[:60]
+        color  = _tag_color(msg.get("msg_type", "normal"))
+
         if sender.startswith("NPC:"):
-            npc_id = sender[4:]
-            npc_cell = self.state.find_object_cell(npc_id)
-            if npc_cell:
-                self.bubbles.append({
-                    "cell": npc_cell,
-                    "text": msg.get("content", "")[:60],
-                    "color": _tag_color(msg.get("msg_type", "normal")),
-                    "born_at": time.time(),
-                    "player_uuid": None,
-                })
-            return
-        cell_key = f"{0},{0}"
-        for key, uuids in self.state.players_at.items():
-            if sender in uuids:
-                cell_key = key
-                break
-        if cell_key:
-            x, y = map(int, cell_key.split(","))
+            # NPC impersonation — track by npc_id so bubble follows the NPC
             self.bubbles.append({
-                "cell": (x, y),
-                "text": msg.get("content", "")[:60],
-                "color": _tag_color(msg.get("msg_type", "normal")),
-                "born_at": time.time(),
-                "player_uuid": sender,
+                "npc_id":      sender[4:],
+                "player_uuid": None,
+                "text":        text,
+                "color":       color,
+                "born_at":     time.time(),
             })
+            return
+
+        # Player bubble — check the sender actually has a position (DM does not)
+        in_world = any(sender in uuids
+                       for uuids in self.state.players_at.values())
+        if not in_world:
+            return   # DM has no player sprite; skip bubble
+
+        self.bubbles.append({
+            "player_uuid": sender,
+            "npc_id":      None,
+            "text":        text,
+            "color":       color,
+            "born_at":     time.time(),
+        })
 
     def set_combat_action(self, action_dict: Optional[dict], targets: set) -> None:
         self._combat_action = action_dict
         self._valid_targets = targets
+
+    def set_combat_move_mode(self, enabled: bool) -> None:
+        self._combat_move_mode = enabled
+
+    def set_combat_valid_moves(self, cells: set) -> None:
+        self._combat_valid_moves = set(cells)
 
     def pan(self, dx: float, dy: float) -> None:
         self.offset_x += dx
@@ -160,6 +169,15 @@ class GameCanvas(tk.Canvas):
             w = self.winfo_width() or 800
             h = self.winfo_height() or 600
             cell_px = BASE_CELL_PX * self.zoom
+
+            # PC: camera always locked to the player — no free pan or zoom
+            if not self.is_dm:
+                pc = self._player_cell()
+                if pc:
+                    self.offset_x = (pc[0] * BASE_CELL_PX + BASE_CELL_PX / 2
+                                     - w / (2 * self.zoom))
+                    self.offset_y = (pc[1] * BASE_CELL_PX + BASE_CELL_PX / 2
+                                     - h / (2 * self.zoom))
 
             min_cx = int(self.offset_x / BASE_CELL_PX) - 1
             max_cx = int((self.offset_x + w / self.zoom) / BASE_CELL_PX) + 2
@@ -278,17 +296,12 @@ class GameCanvas(tk.Canvas):
             return
         cur = tq[self.state.combat.current_index]
 
-        cur_cell = self._find_combatant_cell(cur)
-        if cur_cell and cur.can_move:
-            cx, cy = cur_cell
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                nx, ny = cx + dx, cy + dy
-                nc = self.state.grid.get((nx, ny))
-                if nc and nc.walkable and not nc.occupant:
-                    x0, y0, x1, y1 = self._cell_rect(nx, ny, cell_px)
-                    self.create_rectangle(x0, y0, x1, y1,
-                                         fill="#3399ff", stipple="gray25",
-                                         outline="#3399ff", tags="highlight")
+        if cur.can_move and self._combat_move_mode and self._combat_valid_moves:
+            for (nx, ny) in self._combat_valid_moves:
+                x0, y0, x1, y1 = self._cell_rect(nx, ny, cell_px)
+                self.create_rectangle(x0, y0, x1, y1,
+                                      fill="#3399ff", stipple="gray25",
+                                      outline="#3399ff", tags="highlight")
 
         if self._valid_targets:
             for (tx, ty) in self._valid_targets:
@@ -485,10 +498,25 @@ class GameCanvas(tk.Canvas):
     def _draw_bubbles(self, cell_px: float) -> None:
         now = time.time()
         for bubble in self.bubbles:
-            cell = bubble.get("cell")
-            if not cell:
+            # Resolve current position each frame so bubbles follow moving entities
+            npc_id = bubble.get("npc_id")
+            pid    = bubble.get("player_uuid")
+            if npc_id:
+                current = self.state.find_object_cell(npc_id)
+                if not current:
+                    continue
+                gx, gy = current
+            elif pid:
+                current = None
+                for key, uuids in self.state.players_at.items():
+                    if pid in uuids:
+                        gx, gy = map(int, key.split(","))
+                        current = (gx, gy)
+                        break
+                if not current:
+                    continue
+            else:
                 continue
-            gx, gy = cell
             x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
             cx = (x0 + x1) / 2
 
@@ -534,12 +562,14 @@ class GameCanvas(tk.Canvas):
         for pid in uuids:
             p = self.state.players.get(pid)
             if p:
+                char_name = getattr(p, "CharacterName", "")
+                display = f"{char_name} ({p.Name})" if char_name else p.Name
                 if self.is_dm:
-                    lines.append(f"{p.Name}  HP {p.CurrentHP}/{p.MaximumHP}")
+                    lines.append(f"{display}  HP {p.CurrentHP}/{p.MaximumHP}")
                     for k in ("Str", "Dex", "Con", "Int", "Wis", "Cha"):
                         lines.append(f"  {k}: {p.Stats.get(k, 0)}")
                 else:
-                    lines.append(p.Name)
+                    lines.append(display)
 
         # Occupant (NPC / Item / Door)
         npc_included_location = False
@@ -634,29 +664,23 @@ class GameCanvas(tk.Canvas):
                 self.open_context("combat_action_confirm", (gx, gy))
             else:
                 self.set_combat_action(None, set())
+                self.open_context("combat_targeting_cancelled", (gx, gy))
             return
 
         if self.is_dm:
             cell = self.state.grid.get((gx, gy))
 
-            # ── DM NPC combat movement (click adjacent ground tile) ──────────
+            # ── DM NPC combat movement (requires move mode; any tile in valid set) ──
             if (self.state.combat and self.state.combat.active
-                    and not self.y_held and not self.u_held):
+                    and not self.y_held and not self.u_held
+                    and self._combat_move_mode):
                 ct_idx = self.state.combat.current_index
                 if ct_idx < len(self.state.combat.turn_queue):
                     ct = self.state.combat.turn_queue[ct_idx]
                     if ct.combatant_type == "npc" and ct.can_move:
-                        npc_cell = self.state.find_object_cell(ct.id)
-                        if npc_cell:
-                            nx, ny = npc_cell
-                            if (abs(gx - nx) + abs(gy - ny) == 1
-                                    and cell and cell.walkable
-                                    and not cell.occupant
-                                    and cell.tile_type == "ground"):
-                                self.send({"type": "DM_NPC_MOVE",
-                                           "npc_id": ct.id,
-                                           "target_cell": [gx, gy]})
-                                return
+                        if (gx, gy) in self._combat_valid_moves:
+                            self.open_context("combat_move", (gx, gy))
+                            return
 
             # ── Block most DM edits during active combat ─────────────────────
             in_combat = bool(self.state.combat and self.state.combat.active)
@@ -713,20 +737,27 @@ class GameCanvas(tk.Canvas):
             pc = self._player_cell()
             if pc:
                 px, py = pc
+                in_combat = bool(self.state.combat and self.state.combat.active)
                 if (gx, gy) == (px, py):
-                    # Clicking own cell — trigger Ground interaction for Stairs / Items
                     gc = self.state.grid.get((gx, gy))
                     if gc and isinstance(gc.occupant, (Stairs, Item)):
                         self.open_context("own_cell_interact", (gx, gy))
                         return
-                elif abs(gx - px) <= 1 and abs(gy - py) <= 1:
+                elif abs(gx - px) <= 1 and abs(gy - py) <= 1 and not self._combat_move_mode:
                     cell = self.state.grid.get((gx, gy))
                     if cell:
                         uuids = self.state.players_at.get(f"{gx},{gy}", [])
                         if cell.occupant or uuids:
                             self.open_context("left_interact", (gx, gy))
                             return
-                if abs(gx - px) + abs(gy - py) == 1:
+
+                if in_combat and self._combat_move_mode:
+                    # Move mode: any highlighted cell is valid; anything else cancels
+                    if (gx, gy) in self._combat_valid_moves:
+                        self.open_context("combat_move", (gx, gy))
+                    elif (gx, gy) != (px, py):
+                        self.open_context("combat_targeting_cancelled", (gx, gy))
+                elif not in_combat and abs(gx - px) + abs(gy - py) == 1:
                     self.send({"type": "PLAYER_MOVE", "target_cell": [gx, gy]})
 
     def _place_wall_at(self, gx: int, gy: int) -> None:
@@ -820,6 +851,8 @@ class GameCanvas(tk.Canvas):
         self.open_context("right_click", (gx, gy), (event.x_root, event.y_root))
 
     def _on_scroll(self, event) -> None:
+        if not self.is_dm:
+            return   # PC camera is locked to player; only DM may zoom
         mx, my = event.x, event.y
         wx = mx / self.zoom + self.offset_x
         wy = my / self.zoom + self.offset_y

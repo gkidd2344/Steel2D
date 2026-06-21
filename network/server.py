@@ -71,11 +71,16 @@ class ClientConn:
 
 
 class GameServer:
-    def __init__(self, state: GameState, ui_queue: queue.Queue, port: int, host_uuid: str):
+    def __init__(self, state: GameState, ui_queue: queue.Queue, port: int,
+                 host_uuid: str, password: str = "",
+                 prefabs: list = None):
         self.state = state
         self.ui_queue = ui_queue
         self.port = port
         self.host_uuid = host_uuid
+        self.password  = password
+        self._prefabs  = list(prefabs) if prefabs else []
+        self._water_ticks: Dict[str, int] = {}   # pid -> consecutive ticks on water
         self.clients: Dict[str, ClientConn] = {}
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -138,12 +143,34 @@ class GameServer:
                 # ── Players ───────────────────────────────────────────────────
                 for pid, player in list(self.state.players.items()):
                     buffs = getattr(player, "Buffs", [])
-                    if not isinstance(buffs, list) or not buffs:
+                    if not isinstance(buffs, list):
+                        continue
+                    # Water / Drowning tick
+                    pc = self._player_cells.get(pid)
+                    cd = self.state.grid.get(pc) if pc else None
+                    on_water = bool(cd and cd.tile_type == "water")
+                    if on_water:
+                        self._water_ticks[pid] = self._water_ticks.get(pid, 0) + 1
+                        if self._water_ticks[pid] >= 5:
+                            if not any(b.get("Name") == "Drowning" for b in player.Buffs):
+                                player.Buffs.append({
+                                    "Name": "Drowning",
+                                    "Type": "HP Over Time",
+                                    "Value": -int(self.state.settings.hp_base_multiplier),
+                                    "Duration": 99999.0,
+                                })
+                    else:
+                        self._water_ticks[pid] = 0
+                        player.Buffs[:] = [b for b in player.Buffs
+                                           if b.get("Name") != "Drowning"]
+                    if not player.Buffs:
+                        patches.append({"op": "set_player", "path": pid,
+                                        "value": player.to_dict()})
                         continue
                     await self._apply_hot_buffs(player, player.Name or "Player")
-                    for b in buffs:
+                    for b in player.Buffs:
                         b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
-                    player.Buffs[:] = [b for b in buffs if b.get("Duration", 0) > 0]
+                    player.Buffs[:] = [b for b in player.Buffs if b.get("Duration", 0) > 0]
                     patches.append({"op": "set_player", "path": pid,
                                     "value": player.to_dict()})
 
@@ -205,6 +232,7 @@ class GameServer:
         player_uuid = msg.get("uuid", "")
         alias = msg.get("alias", "Unknown")
         avatar_b64 = msg.get("avatar_b64")
+        character_data = msg.get("character")  # PlayerObject dict, may be None
 
         if self._is_banned(player_uuid):
             await conn.send({"type": "REJECT", "reason": "You are banned from this server."})
@@ -216,7 +244,7 @@ class GameServer:
         self.clients[player_uuid] = conn
 
         if conn.is_host:
-            # DM has no player object — send full state and return
+            # DM has no player object — send full state and return (no password check)
             await conn.send({
                 "type": "WELCOME",
                 "player_id": player_uuid,
@@ -226,15 +254,29 @@ class GameServer:
             self.ui_queue.put(("PLAYER_JOINED", {"uuid": player_uuid, "alias": alias}))
             return True
 
+        # ── Password check (non-DM only) ──────────────────────────────────────
+        if self.password:
+            if msg.get("password", "") != self.password:
+                await conn.send({"type": "REJECT", "reason": "incorrect_password"})
+                del self.clients[player_uuid]
+                return False
+
         # ── Regular player ────────────────────────────────────────────────────
         if player_uuid not in self.state.players:
             color = self._assign_color(player_uuid)
             self.state.assigned_colors[player_uuid] = color
-            hp = calc_max_hp("Medium", 1, 0, self.state.settings.hp_base_multiplier)
-            player = PlayerObject(
-                id=player_uuid, Name=alias, color=color,
-                MaximumHP=hp, CurrentHP=hp,
-            )
+            if character_data:
+                # Restore player from their character save
+                player = PlayerObject.from_dict(character_data)
+                player.id = player_uuid
+                player.Name = alias         # session alias always wins
+                player.color = color
+            else:
+                hp = calc_max_hp("Medium", 1, 0, self.state.settings.hp_base_multiplier)
+                player = PlayerObject(
+                    id=player_uuid, Name=alias, color=color,
+                    MaximumHP=hp, CurrentHP=hp,
+                )
             self.state.players[player_uuid] = player
             cell = self._find_spawn_cell()
             key = f"{cell[0]},{cell[1]}"
@@ -258,10 +300,13 @@ class GameServer:
 
         your_cell = list(self._player_cells.get(player_uuid, (0, 0)))
         await conn.send({
-            "type": "WELCOME",
-            "player_id": player_uuid,
-            "game_state": self.state.to_dict(),
-            "your_cell": your_cell,
+            "type":         "WELCOME",
+            "player_id":    player_uuid,
+            "game_state":   self.state.to_dict(),
+            "your_cell":    your_cell,
+            # Send host's prefab library so the client can persist it locally
+            "host_uuid":    self.host_uuid,
+            "host_prefabs": self._prefabs,
         })
 
         patches = [
@@ -275,6 +320,13 @@ class GameServer:
         return True
 
     async def _handle_disconnect(self, conn: ClientConn) -> None:
+        # Send the player their final PlayerObject state for character persistence
+        if conn.uuid and conn.uuid in self.state.players and not conn.is_host:
+            try:
+                await conn.send({"type": "PLAYER_DATA",
+                                 "player": self.state.players[conn.uuid].to_dict()})
+            except Exception:
+                pass
         if conn.uuid and conn.uuid in self.clients:
             del self.clients[conn.uuid]
             alias = conn.alias
@@ -321,7 +373,12 @@ class GameServer:
         }
         h = handlers.get(t)
         if h:
-            await h(conn, msg)
+            try:
+                await h(conn, msg)
+            except Exception:
+                # Swallow handler errors — they must not propagate to
+                # _handle_client's except block, which would disconnect the client
+                pass
 
     # ── movement ──────────────────────────────────────────────────────────────
 
@@ -344,15 +401,23 @@ class GameServer:
         if cell is None:
             return
         cx, cy = cell
-        if abs(tx - cx) + abs(ty - cy) != 1:
-            return
         target = self.state.grid.get((tx, ty))
         if not target or not target.walkable:
             return
-        if target.occupant and not isinstance(target.occupant, (Item, Stairs)):
-            if isinstance(target.occupant, Door) and not target.occupant.Open:
+
+        if self.state.combat and self.state.combat.active:
+            # In combat: BFS validation up to COMBAT_MOVE_RANGE tiles
+            from game.state import find_combat_move_cells
+            if (tx, ty) not in find_combat_move_cells(self.state, (cx, cy)):
                 return
-            if isinstance(target.occupant, NPC):
+        else:
+            # Out of combat: one adjacent tile only
+            if abs(tx - cx) + abs(ty - cy) != 1:
+                return
+        if target.occupant and not isinstance(target.occupant, (Item, Stairs)):
+            if isinstance(target.occupant, (NPC, Wall)):   # Wall added
+                return
+            if isinstance(target.occupant, Door) and not target.occupant.Open:
                 return
         for key, uuids in self.state.players_at.items():
             if pid in uuids and key != f"{tx},{ty}":
@@ -378,13 +443,28 @@ class GameServer:
             if ct and ct.id == pid:
                 from game.state import MOVE_COST, TURN_THRESHOLD
                 ct.points_spent += MOVE_COST
-                patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
+                # NOTE: do NOT include set_combat in patches — that causes a race
+                # condition where a stale active:True patch arrives after COMBAT_ENDED.
+                # points_spent is synced via the COMBAT_RESOURCES_USED broadcast below.
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": pid,
                                        "has_acted": ct.has_acted,
                                        "points_spent": ct.points_spent})
                 if ct.points_spent >= TURN_THRESHOLD:
                     auto_end = True
+
+        # ── Drowning: remove immediately if player stepped off water ─────────────
+        on_water = bool(target and target.tile_type == "water")
+        if not on_water:
+            player = self.state.players.get(pid)
+            if player and isinstance(player.Buffs, list):
+                old_len = len(player.Buffs)
+                player.Buffs[:] = [b for b in player.Buffs
+                                   if b.get("Name") != "Drowning"]
+                self._water_ticks[pid] = 0
+                if len(player.Buffs) != old_len:
+                    patches.append({"op": "set_player", "path": pid,
+                                    "value": player.to_dict()})
 
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
         if auto_end:
@@ -430,13 +510,18 @@ class GameServer:
                 if tp:
                     target = tp
 
+        _UNARMED = {"Range": 1, "BaseDamage": 1, "Hits": 2,
+                    "ScalesWith": {"Str": "A", "Dex": "B"}}
         scalars = None
         action = None
-        if item_id:
+        if action_name == "Unarmed Attack":
+            action = _UNARMED
+            scalars = _UNARMED["ScalesWith"]
+        elif item_id:
             item = next((i for i in player.Equipment.values() if i.id == item_id), None)
             if item and item.Actions:
                 action = item.Actions.get(action_name)
-                scalars = item.Scalars
+                scalars = action.get("ScalesWith") if action else None
 
         # Validate Casts charge
         if action and action.get("Casts"):
@@ -451,9 +536,8 @@ class GameServer:
                                                 "value": player.to_dict()}]})
 
         if target is None:
-            # Fizzle — action fires at empty cell
             await self._broadcast_combat_chat(
-                f"{player.Name} uses {action_name or 'Attack'} — but nothing is there!",
+                f"{player.Name} uses {action_name or 'Unarmed Attack'}. It doesn't do anything...",
                 "combat_fizzle")
         else:
             total = apply_action(player, scalars, action, target, self.state.settings)
@@ -592,29 +676,77 @@ class GameServer:
                     self.state.combat.current_index + 1, turn)
             patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
 
+    @staticmethod
+    def _attempt_saving_throw(entity, buff: dict) -> Optional[str]:
+        """
+        Check if entity passes the saving throw for `buff`.
+        Returns the stat key used if the throw SUCCEEDS (buff is removed without effect),
+        or None if it fails (buff proceeds normally) or no saving throw is defined.
+
+        Roll: stat_mod(StatValue) + randint(1, 20) >= SavingThrow[stat]
+        """
+        import random
+        from game.stats import stat_mod
+        if not buff.get("HasSavingThrow"):
+            return None
+        st: dict = buff.get("SavingThrow") or {}
+        for stat, threshold in st.items():
+            if not isinstance(threshold, (int, float)) or threshold <= 0:
+                continue
+            modifier = stat_mod(entity.Stats.get(stat, 0))
+            roll = modifier + random.randint(1, 20)
+            if roll >= threshold:
+                return stat
+        return None
+
     async def _apply_hot_buffs(self, entity, name: str) -> None:
         """
-        Apply all HP Over Time buffs to entity in heal-first order.
-        Each buff gets its own colour-coded chat message.
+        Apply all HP Over Time buffs to entity in heal-first order, checking
+        saving throws first. Buffs that pass their saving throw are removed
+        without applying their effect.
         """
         buffs = getattr(entity, "Buffs", [])
         if not isinstance(buffs, list):
             return
+
+        to_remove_via_save: list = []
         hot = [b for b in buffs if b.get("Type") == "HP Over Time"]
         heals   = [b for b in hot if b.get("Value", 0) > 0]
         damages = [b for b in hot if b.get("Value", 0) < 0]
+
         for buff in heals:
+            stat = self._attempt_saving_throw(entity, buff)
+            if stat:
+                to_remove_via_save.append(buff)
+                await self._broadcast_combat_chat(
+                    f"{name} succeeded a saving throw for [{buff.get('Name', 'Buff')}].",
+                    "system")
+                continue
             amt = buff.get("Value", 0)
             entity.CurrentHP = min(entity.MaximumHP, entity.CurrentHP + amt)
             await self._broadcast_combat_chat(
                 f"{name} regenerates {amt} HP from [{buff.get('Name', 'Buff')}].",
                 "combat_heal")
+
         for buff in damages:
+            stat = self._attempt_saving_throw(entity, buff)
+            if stat:
+                to_remove_via_save.append(buff)
+                await self._broadcast_combat_chat(
+                    f"{name} succeeded a saving throw for [{buff.get('Name', 'Buff')}].",
+                    "system")
+                continue
             amt = abs(buff.get("Value", 0))
             entity.CurrentHP = max(0, entity.CurrentHP - amt)
             await self._broadcast_combat_chat(
                 f"{name} takes {amt} damage from [{buff.get('Name', 'Buff')}].",
                 "combat_damage")
+
+        for buff in to_remove_via_save:
+            try:
+                buffs.remove(buff)
+            except ValueError:
+                pass
 
     async def _broadcast_combat_chat(self, text: str, msg_type: str = "system") -> None:
         await self._broadcast({"type": "CHAT_RECV", "message": {
@@ -653,6 +785,26 @@ class GameServer:
         for b in buffs:
             b["Duration"] = max(0.0, b.get("Duration", 0.0) - 1.0)
         entity.Buffs[:] = [b for b in buffs if b.get("Duration", 0) > 0]
+
+        # ── Water / Drowning (players only) ──────────────────────────────────────
+        if entity_type == "player":
+            pc = self._player_cells.get(entity_id)
+            cell_data = self.state.grid.get(pc) if pc else None
+            on_water = bool(cell_data and cell_data.tile_type == "water")
+            if on_water:
+                self._water_ticks[entity_id] = self._water_ticks.get(entity_id, 0) + 1
+                if self._water_ticks[entity_id] >= 5:
+                    has_drown = any(b.get("Name") == "Drowning" for b in entity.Buffs)
+                    if not has_drown:
+                        entity.Buffs.append({
+                            "Name": "Drowning",
+                            "Type": "HP Over Time",
+                            "Value": -int(self.state.settings.hp_base_multiplier),
+                            "Duration": 99999.0,
+                        })
+            else:
+                self._water_ticks[entity_id] = 0
+                entity.Buffs[:] = [b for b in entity.Buffs if b.get("Name") != "Drowning"]
 
         patches = []
         if entity_type == "player":
@@ -1119,6 +1271,12 @@ class GameServer:
         if not target:
             return
         self._record_ban(pid, target.alias, temporary=True)
+        if pid in self.state.players:
+            try:
+                await target.send({"type": "PLAYER_DATA",
+                                   "player": self.state.players[pid].to_dict()})
+            except Exception:
+                pass
         await target.send({"type": "YOU_WERE_KICKED",
                            "reason": "You were disconnected by the host."})
         target.close()
@@ -1264,11 +1422,21 @@ class GameServer:
         if not src:
             return
         sx, sy = src
-        if abs(tx - sx) + abs(ty - sy) != 1:
-            return
         target_cell = self.state.grid.get((tx, ty))
-        if not target_cell or not target_cell.walkable or target_cell.occupant:
+        if not target_cell or not target_cell.walkable:
             return
+
+        if self.state.combat and self.state.combat.active:
+            # In combat: BFS validation up to COMBAT_MOVE_RANGE tiles
+            from game.state import find_combat_move_cells
+            if (tx, ty) not in find_combat_move_cells(self.state, (sx, sy)):
+                return
+        else:
+            # Out of combat: adjacent empty cells only
+            if abs(tx - sx) + abs(ty - sy) != 1:
+                return
+            if target_cell.occupant:
+                return
         npc = self.state.grid[src].occupant
         self.state.grid[src].occupant = None
         self.state.grid[(tx, ty)].occupant = npc
@@ -1284,7 +1452,7 @@ class GameServer:
             if ct and ct.id == npc_id:
                 from game.state import MOVE_COST, TURN_THRESHOLD
                 ct.points_spent += MOVE_COST
-                patches.append({"op": "set_combat", "value": self.state.combat.to_dict()})
+                # Do NOT append set_combat — avoids stale active:True race condition.
                 await self._broadcast({"type": "COMBAT_RESOURCES_USED",
                                        "combatant_id": npc_id,
                                        "has_acted": ct.has_acted,
@@ -1321,15 +1489,20 @@ class GameServer:
             if tc_cell and tc_cell.occupant:
                 target = tc_cell.occupant
 
-        if action_name == "Default Attack" or not (npc.Actions and action_name in npc.Actions):
+        _UNARMED = {"Range": 1, "BaseDamage": 1, "Hits": 2,
+                    "ScalesWith": {"Str": "A", "Dex": "B"}}
+        if action_name == "Unarmed Attack":
+            action = _UNARMED
+            scalars = _UNARMED["ScalesWith"]
+        elif action_name == "Default Attack" or not (npc.Actions and action_name in npc.Actions):
             scalars, action = None, None
         else:
-            scalars = npc.Scalars
             action = npc.Actions[action_name]
+            scalars = action.get("ScalesWith") or getattr(npc, "Scalars", None)
 
         if target is None:
             await self._broadcast_combat_chat(
-                f"{npc.Name} uses {action_name} — but nothing is there!",
+                f"{npc.Name} uses {action_name}. It doesn't do anything...",
                 "combat_fizzle")
         else:
             total = apply_action(npc, scalars, action, target, self.state.settings)
@@ -1658,7 +1831,14 @@ class GameServer:
 
     def kick_all_with_message(self, reason: str) -> None:
         async def _kick():
-            for conn in list(self.clients.values()):
+            for pid, conn in list(self.clients.items()):
+                # Send character data before kicking
+                if pid in self.state.players and not conn.is_host:
+                    try:
+                        await conn.send({"type": "PLAYER_DATA",
+                                         "player": self.state.players[pid].to_dict()})
+                    except Exception:
+                        pass
                 await conn.send({"type": "YOU_WERE_KICKED", "reason": reason})
                 conn.close()
         if self._loop and not self._loop.is_closed():

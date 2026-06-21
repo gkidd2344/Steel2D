@@ -435,6 +435,37 @@ def _add_buff_entry(list_frame: tk.Frame, buff_rows: list,
                  font=FONTS["small"]).pack(side=tk.LEFT, padx=(0, 2))
         _sp_widget(rb, var, mn, mx, w).pack(side=tk.LEFT, padx=(0, 6))
 
+    # ── Saving Throw (optional) ───────────────────────────────────────────────
+    st_p = prefill.get("SavingThrow") or {} if prefill else {}
+    bv["has_saving_throw"] = tk.BooleanVar(value=bool(prefill and prefill.get("HasSavingThrow")))
+    bv["saving_throw"] = {k: tk.IntVar(value=max(0, int(st_p.get(k, 0)))) for k in STAT_KEYS}
+
+    st_outer = tk.Frame(row_f, bg=row_bg); st_outer.pack(fill=tk.X, pady=(3, 0))
+    st_chk   = tk.Frame(st_outer, bg=row_bg); st_chk.pack(fill=tk.X)
+    st_sub   = tk.Frame(st_outer, bg=row_bg)
+
+    def _toggle_st():
+        if bv["has_saving_throw"].get():
+            st_sub.pack(fill=tk.X, pady=(2, 0))
+        else:
+            st_sub.pack_forget()
+
+    styled_check(st_chk, "Has Saving Throw", bv["has_saving_throw"],
+                 command=_toggle_st, bg=row_bg).pack(side=tk.LEFT, padx=4)
+
+    for sk in STAT_KEYS:
+        col_f = tk.Frame(st_sub, bg=row_bg); col_f.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(col_f, text=sk, bg=row_bg, fg="#ffffff",
+                 font=FONTS["small"]).pack(side=tk.LEFT)
+        sp = tk.Spinbox(col_f, from_=0, to=99, textvariable=bv["saving_throw"][sk],
+                        width=4, bg=PALETTE["card2"], fg="#ffffff",
+                        insertbackground="#ffffff", relief=tk.FLAT, bd=0,
+                        buttonbackground=PALETTE["muted"])
+        sp.pack(side=tk.LEFT, padx=1)
+
+    if bv["has_saving_throw"].get():
+        st_sub.pack(fill=tk.X, pady=(2, 0))
+
 
 def _build_action_flat_form(parent: tk.Frame, bg: str,
                             prefill: dict = None,
@@ -532,9 +563,6 @@ def _build_action_flat_form(parent: tk.Frame, bg: str,
         })
 
     add_r = tk.Frame(bs, bg=bg); add_r.pack(anchor="w", pady=(4, 0))
-    flat_btn(add_r, "+  New Buff",
-             lambda: _add_buff_entry(buff_list, v["buff_rows"], bg),
-             style="ghost").pack(side=tk.LEFT, padx=(0, 6))
 
     def _pick_prefab_buff():
         # Session buffs (created this session, not yet saved to disk)
@@ -547,15 +575,25 @@ def _build_action_flat_form(parent: tk.Frame, bg: str,
         all_buffs = sess_buffs + [d for d in disk_buffs
                                    if d.get("Name", "") not in sess_names]
         if not all_buffs:
-            messagebox.showinfo("No Buff Prefabs",
-                                "No Buff-type objects found in this session or on disk.")
+            from ui.panel import Panel as _Panel
+            import tkinter as _tk2
+            _p = _Panel(bo, padx=24, pady=18)
+            _tk2.Label(_p, text="No Buff Prefabs", bg=PALETTE["card"],
+                       fg=PALETTE["fg"], font=FONTS["heading"]).pack(anchor="w", pady=(0, 8))
+            _tk2.Label(_p,
+                       text="No Buff-type prefabs found.\n"
+                            "Create one in the DM Workshop\n"
+                            "Prefab Builder under 'Buff' type first.",
+                       bg=PALETTE["card"], fg=PALETTE["fg"], font=FONTS["body"],
+                       justify="left").pack(anchor="w", pady=(0, 14))
+            flat_btn(_p, "OK", _p.close, style="normal").pack(fill=_tk2.X, ipady=3)
             return
         from dialogs.spawn_prefab_dialog import SpawnPrefabDialog
         SpawnPrefabDialog(bo, prefabs=all_buffs,
                           on_spawn=lambda bd: _add_buff_entry(
                               buff_list, v["buff_rows"], bg, bd))
-    flat_btn(add_r, "+  Prefab Buff", _pick_prefab_buff,
-             style="muted").pack(side=tk.LEFT)
+    flat_btn(add_r, "+Buff", _pick_prefab_buff,
+             style="ghost").pack(side=tk.LEFT)
 
     def _tog_b():
         (bs.pack if v["has_buffs"].get() else bs.pack_forget)(fill=tk.X, pady=(2, 0))
@@ -614,6 +652,12 @@ def _collect_action_flat(v: dict, existing_id: str = None) -> dict:
             }
             if bd["Type"] == "Stat Modifier":
                 bd["Stat"] = bv["stat"].get()
+            if bv.get("has_saving_throw") and bv["has_saving_throw"].get():
+                st = {k: v2.get() for k, v2 in (bv.get("saving_throw") or {}).items()
+                      if v2.get() > 0}
+                if st:
+                    bd["HasSavingThrow"] = True
+                    bd["SavingThrow"] = st
             if bd["Name"]:
                 gives.append(bd)
         if gives:
@@ -843,6 +887,35 @@ class _EmbeddedSpawnForm(tk.Frame):
         _sp_row("Value",        self._buff_value_var,    -9999, 9999)
         _sp_row("Duration(min)", self._buff_duration_var,    0, 9999)
 
+        # ── Has Saving Throw ──────────────────────────────────────────────────
+        self._buff_has_st_var = tk.BooleanVar(value=False)
+        self._buff_st_vars = {k: tk.IntVar(value=0) for k in STAT_KEYS}
+
+        st_outer = tk.Frame(f, bg=PALETTE["card"]); st_outer.pack(fill=tk.X, pady=(6, 0))
+        st_chk   = tk.Frame(st_outer, bg=PALETTE["card"]); st_chk.pack(fill=tk.X)
+        st_sub   = tk.Frame(st_outer, bg=PALETTE["card"])
+
+        def _toggle_st():
+            if self._buff_has_st_var.get():
+                st_sub.pack(fill=tk.X, pady=(4, 0))
+            else:
+                st_sub.pack_forget()
+            self.after_idle(self._update_scroll)
+
+        styled_check(st_chk, "Has Saving Throw", self._buff_has_st_var,
+                     command=_toggle_st,
+                     bg=PALETTE["card"]).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(st_sub, text="Threshold per stat (0 = ignored)",
+                 bg=PALETTE["card"], fg=PALETTE["fg_dim"],
+                 font=FONTS["small"]).pack(anchor="w", padx=4, pady=(2, 2))
+        st_grid = tk.Frame(st_sub, bg=PALETTE["card"]); st_grid.pack(anchor="w", padx=4)
+        for sk in STAT_KEYS:
+            col = tk.Frame(st_grid, bg=PALETTE["card"]); col.pack(side=tk.LEFT, padx=(0, 8))
+            tk.Label(col, text=sk, bg=PALETTE["card"], fg="#ffffff",
+                     font=FONTS["small"]).pack()
+            _sp_widget(col, self._buff_st_vars[sk], 0, 99, 4).pack()
+
     def _build_buff_result(self) -> Optional[dict]:
         name = self._buff_name_var.get().strip()
         if not name:
@@ -859,6 +932,11 @@ class _EmbeddedSpawnForm(tk.Frame):
         }
         if self._buff_type_var.get() == "Stat Modifier":
             result["Stat"] = self._buff_stat_var.get()
+        if self._buff_has_st_var.get():
+            st = {k: v.get() for k, v in self._buff_st_vars.items() if v.get() > 0}
+            if st:
+                result["HasSavingThrow"] = True
+                result["SavingThrow"] = st
         return result
 
     # ── add button ────────────────────────────────────────────────────────────

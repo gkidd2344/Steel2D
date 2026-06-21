@@ -12,13 +12,16 @@ from network.protocol import encode_msg
 
 class GameClient:
     def __init__(self, host: str, port: int, ui_queue: queue.Queue,
-                 player_uuid: str, alias: str, avatar_b64: Optional[str]):
+                 player_uuid: str, alias: str, avatar_b64: Optional[str],
+                 password: str = "", character_data: Optional[dict] = None):
         self.host = host
         self.port = port
         self.ui_queue = ui_queue
         self.player_uuid = player_uuid
         self.alias = alias
         self.avatar_b64 = avatar_b64
+        self.password = password
+        self.character_data = character_data
 
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -89,6 +92,8 @@ class GameClient:
             "uuid": self.player_uuid,
             "alias": self.alias,
             "avatar_b64": self.avatar_b64,
+            "password": self.password,
+            "character": self.character_data,
         })
 
         while not self._stopped:
@@ -111,6 +116,8 @@ class GameClient:
             elif t == "REJECT":
                 self.ui_queue.put(("REJECT", msg))
                 break
+            elif t == "PLAYER_DATA":
+                self.ui_queue.put(("PLAYER_DATA", msg))
             elif t == "PONG":
                 ts = msg.get("ts", time.time())
                 self._latency_ms = (time.time() - ts) * 1000

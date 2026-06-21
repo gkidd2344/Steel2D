@@ -126,42 +126,34 @@ class StairModifyDialog(Panel):
         self._on_save(obj_d)
 
 
-class StairPromptDialog:
-    """Centered blocking confirmation for stair traversal."""
+class StairPromptDialog(Panel):
+    """
+    Top-centre confirmation for stair traversal.
+    No dark backdrop — background stays fully visible.
+    """
 
     def __init__(self, parent, stair: "Stairs",
                  on_yes: Callable, on_no: Callable):
-        root = parent.winfo_toplevel()
-        self._backdrop = tk.Frame(root, bg="#000000")
-        self._backdrop.place(x=0, y=0, relwidth=1, relheight=1)
-        self._backdrop.lift()
-
-        panel = tk.Frame(self._backdrop, bg=PALETTE["card"], padx=32, pady=24)
-        panel.place(relx=0.5, rely=0.5, anchor="center")
+        super().__init__(parent, padx=32, pady=24, placement="top")
+        self._on_yes = on_yes
+        self._on_no  = on_no
 
         direction = stair.Direction.lower()
-        tk.Label(panel, text=f"Proceed {direction} the stairs?",
+        tk.Label(self, text=f"Proceed {direction} the stairs?",
                  bg=PALETTE["card"], fg=PALETTE["fg"],
                  font=FONTS["heading"]).pack(pady=(0, 20))
 
-        btn_row = tk.Frame(panel, bg=PALETTE["card"])
+        btn_row = tk.Frame(self, bg=PALETTE["card"])
         btn_row.pack()
-
-        def _yes():
-            self._close()
-            on_yes()
-
-        def _no():
-            self._close()
-            on_no()
-
-        flat_btn(btn_row, "Yes", _yes, style="normal").pack(
+        flat_btn(btn_row, "Yes", self._yes, style="normal").pack(
             side=tk.LEFT, padx=(0, 10), ipadx=8)
-        flat_btn(btn_row, "No", _no, style="ghost").pack(
+        flat_btn(btn_row, "No", self._no, style="ghost").pack(
             side=tk.LEFT, ipadx=8)
 
-    def _close(self) -> None:
-        try:
-            self._backdrop.destroy()
-        except Exception:
-            pass
+    def _yes(self) -> None:
+        self.close()
+        self._on_yes()
+
+    def _no(self) -> None:
+        self.close()
+        self._on_no()

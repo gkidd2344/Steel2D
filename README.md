@@ -1,7 +1,7 @@
 # Steel2D — Full Technical Requirements
 **Target audience:** Claude Code (automated implementation)  
-**Version:** 0.11.2  
-**Supersedes:** REQUIREMENTS v0.4.0
+**Version:** v0.15  
+**Supersedes:** v0.14
 
 ---
 
@@ -41,7 +41,7 @@ One player acts as the **Host (Dungeon Master / DM)**: they build and manage the
 
 The host runs the authoritative game **server**; all game-state mutations are validated and broadcast by the server. The host also runs a local client on top of the server, with elevated DM-only permissions. The **DM does not have a PlayerObject** in the game world.
 
-All dialogs open as **in-app floating panels** positioned on the right side of the window — no detached OS windows.
+All dialogs open as **in-app floating panels** — no detached OS windows. Most panels float on the **right side** of the window. Short blocking confirmations (Door interaction, Stair prompt) appear at the **top-centre** of the screen without any backdrop, so the game canvas remains fully visible behind them.
 
 ---
 
@@ -118,7 +118,7 @@ All packages declared in `requirements.txt`.
 │   └── client.py                  # GameClient (asyncio TCP)
 │
 └── ui/
-    ├── panel.py                   # Panel(tk.Frame) — right-side in-app overlay
+    ├── panel.py                   # Panel(tk.Frame) — in-app overlay (right-side or top-centre)
     ├── widgets.py                 # flat_btn, hr, styled_entry, styled_check
     ├── canvas_renderer.py         # GameCanvas(tk.Canvas)
     └── chat_widget.py             # ChatWidget
@@ -141,7 +141,7 @@ All models use `@dataclass`. Every model implements `to_dict() -> dict` and `@cl
 ```python
 STAT_KEYS = ("Str", "Dex", "Con", "Int", "Wis", "Cha")
 
-HEALTH_SIZE_LOOKUP = {"Small": 2, "Medium": 4, "Large": 6, "Giant": 9, "Colossal": 13}
+HEALTH_SIZE_LOOKUP = {"Small": 1, "Medium": 2, "Large": 3, "Giant": 6, "Colossal": 10}
 
 SCALAR_WEIGHT_LOOKUP = {"S": 1.00, "A": 0.70, "B": 0.45, "C": 0.15, "F": 0.05}
 ```
@@ -167,8 +167,8 @@ class NPC:
     Hostile:       bool = True
     MaximumHP:     int = 10
     CurrentHP:     int = 10
-    Stats:         Dict[str, int] = field(default_factory=lambda: {k: 0 for k in STAT_KEYS})
-    Scalars:       Optional[Dict[str, str]] = None     # e.g. {"Str": "A"}
+    Stats:         Dict[str, int] = field(default_factory=lambda: {k: 10 for k in STAT_KEYS})
+    Scalars:       Optional[Dict[str, str]] = None     # per-stat grade (NPC-level; Items no longer use this)
     Actions:       Optional[Dict[str, dict]] = None    # see §4.4
     TurnsAllowed:  int = 1           # extra initiative rolls & turn slots in combat
     Buffs:         List[dict] = field(default_factory=list)  # see §4.5
@@ -192,15 +192,17 @@ class Item:
     type:          str = "Item"
     Name:          str = ""
     Description:   str = ""
-    Level:         int = 1
+    Level:         int = 1     # always 1; no longer user-editable
     Consumable:    bool = False
     Quantity:      int = 1
     Value:         int = 0
     Stats:         Optional[Dict[str, int]] = None    # equipment stat bonuses
-    Scalars:       Optional[Dict[str, str]] = None    # item-level damage scaling
+    Scalars:       None                               # removed in v0.15
     Actions:       Optional[Dict[str, dict]] = None
     EquipmentSlot: Optional[int] = None               # 1-8; see §17.1
 ```
+
+Items no longer have a user-editable Level field and no longer support item-level Scalars. Per-action ScalesWith is still available via action rows.
 
 ---
 
@@ -217,11 +219,11 @@ ActionDict = {
     # Optional
     "Casts":       Optional[{"max_per_rest": int, "remaining": int}],
     "GivesBuffs":  Optional[List[BuffDef]],   # see §4.6
-    "ScalesWith":  Optional[Dict[str, str]],  # per-stat grade overrides (NPC actions only)
+    "ScalesWith":  Optional[Dict[str, str]],  # per-stat grade (NPC actions and Action prefabs only)
 }
 ```
 
-Item-level `Scalars` applies globally to all of that item's actions. NPC actions carry their own per-action `ScalesWith`.
+NPC actions carry their own per-action `ScalesWith`. Items no longer have item-level Scalars.
 
 ---
 
@@ -324,7 +326,7 @@ EQUIPMENT_SLOTS = {
 
 #### Player HP Rules
 
-Initial HP on first join: `calc_max_hp("Medium", 1, 0, hp_base_multiplier)` = 24 at default settings.
+Initial HP on first join: `calc_max_hp("Medium", 1, 10, hp_base_multiplier)` using default stat of 10 for Con.
 
 Players **cannot** edit their own HP. Only DM action or combat/buff effects modify `CurrentHP`.
 
@@ -378,7 +380,7 @@ class GameState:
 ```python
 @dataclass
 class GameSettings:
-    hp_base_multiplier:      float = 6.0
+    hp_base_multiplier:      float = 4.0
     enemy_damage_multiplier: float = 1.0
     los_max_distance:        int   = 20
 ```
@@ -450,7 +452,7 @@ class CombatState:
 
 ```json
 {
-  "hp_base_multiplier": 6.0,
+  "hp_base_multiplier": 4.0,
   "enemy_damage_multiplier": 1.0,
   "los_max_distance": 20
 }
@@ -545,7 +547,7 @@ HSV `(h, 0.85, 1.0)` — always full brightness and high saturation. Hue must ma
 [⚙]  (gear icon, top-right; opens BanlistDialog)
 
    STEEL2D
-   v0.11.0 · multiplayer tabletop lobby
+   v0.15 · multiplayer tabletop lobby
    ─────────────────────────────────────────
    [avatar 40x40]  Signed in as  <alias>
    ─────────────────────────────────────────
@@ -569,7 +571,7 @@ Full-window swap (like GameScreen). Fields:
 - UUID (read-only, small monospace, single line, no wrap)
 - Profile Picture (128x128 Canvas preview; Upload / Remove buttons; PIL crop-to-square)
 
-Save persists to `user.config`.
+Save persists to `user.config`. Player Name must not contain spaces (enforced on save with an error message).
 
 ---
 
@@ -581,7 +583,7 @@ Opened from the main menu. A full-window screen (replaces the window content). A
 
 Two buttons: **Create Prefab Objects** (new builder) and **Load Prefab Objects** (file list panel). Back to Menu.
 
-**Load dialog** (`PrefabLoadDialog`): lists all `*.json` in the prefabs directory, sorted newest-first by mtime. Shows Name / Date / Object Count. Supports Open and Delete (with confirmation).
+**Load dialog** (`PrefabLoadDialog`): lists all `*.json` in the prefabs directory, sorted newest-first by mtime. Shows **Name** and **Date** columns at 50% width each (Object Count column removed). Supports Open and Delete (with confirmation).
 
 ### 8.2 Prefab Builder Layout
 
@@ -607,9 +609,11 @@ Type: [NPC][Item][Action]    |  Prefab Objects
 
 Reuses `SpawnObjectDialog` form builders. Collapsible sections; **General always starts expanded**.
 
-**NPC sections:** General (Name, Description, Level, Size, Hostile, Turns Allowed, **Current HP before Maximum HP**), Stats, Actions.
+**NPC sections:** General (Name, Description, Level, Size, Hostile, Turns Allowed, **Maximum HP readonly** auto-calculated from Size + Con), Stats, Actions.
+- Current HP is **not** shown in the create/modify form. Use right-click → **Modify Current HP** on a spawned NPC.
 
-**Item sections:** General (Name, Description, Level, Quantity, Value (g), Consumable, Equipment Slot), Scalars, Stat Modifiers, Actions.
+**Item sections:** General (Name, Description, Quantity, Value (g), Consumable, Equipment Slot), Stat Modifiers, Actions.
+- Items no longer have Level or Scalars fields.
 
 #### 8.2.2 Action Form (left panel)
 
@@ -617,10 +621,10 @@ Flat layout (no collapsible sections), mirroring NPC/Item action row style:
 - Name (required), Description (2-line textarea)
 - Range, Dmg, Hits
 - `[  ] Limited Uses (Casts)` -> Max/rest, Remaining (hidden until checked)
-- `[  ] Applies Buffs` -> list of buff entries (+New Buff / +Prefab Buff)
+- `[  ] Applies Buffs` -> list of buff entries (`+Buff` button — loads from session table + disk)
 - `[  ] Scales With Stat` -> per-stat grade dropdowns
 
-+Prefab Buff searches session objects + disk for Buff-type prefabs, merging both (session takes priority on name collision).
+`+Buff` searches session Prefab Objects table first, then disk prefab files, merging both (session takes priority on name collision).
 
 #### 8.2.3 Buff Form (left panel)
 
@@ -640,16 +644,16 @@ Names must be unique **within the same object type** (NPC/Item/Action/Buff). Doo
 
 **Exit Prefab Builder**: confirmation "Would you like to exit? Anything not saved will be lost." -> Exit (danger) or Go Back (normal).
 
-### 8.3 In-Game Spawn Prefab
+### 8.3 In-Game Spawn Object Using Prefabs
 
-DM right-clicks unoccupied non-protected ground -> **Spawn Prefab...** (only shown when `GameScreen.prefabs` is non-empty).
+DM right-clicks unoccupied non-protected ground -> **Spawn Object...** (only shown when `GameScreen.prefabs` is non-empty).
 
-Opens `SpawnPrefabDialog` — filtered to NPC and Item types only (Action/Buff cannot be placed on the grid):
-1. **Table view**: Name / Type / Description; clickable rows.
+Opens `SpawnPrefabDialog` — NPC and Item types only, on individual tabs (Action/Buff cannot be placed on the grid):
+1. **Table view**: Name / Type / Description; clickable rows; search bar at top filters on Name and Description text for substring matches.
 2. **Detail view** (on row click): read-only field list; Spawn / <- Back.
 3. Spawn: fresh UUID assigned; placed via DM_SPAWN_OBJECT; panel closes.
 
-### 8.4 Session Prefabs
+### 8.3 Session Prefabs
 
 - All prefab files in `<game_dir>/prefabs/` loaded at host-game-start into `GameScreen.prefabs`.
 - Every NPC or Item the DM creates in-game via Spawn Object is also appended to `self.prefabs` immediately (without saving to disk), making it reusable via Spawn Prefab for the rest of the session.
@@ -688,16 +692,22 @@ Scroll-to-zoom centres on the mouse cursor.
 
 ### 9.3 DM Camera Pan (smooth)
 
-WASD / arrow keys held -> continuous pan at 9 canvas px/frame divided by zoom. Diagonal speed normalised (x 0.707). Panning starts on key-press and stops on key-release. WASD disabled when any `tk.Entry` or `tk.Text` widget has focus.
+WASD / arrow keys held → continuous pan at 9 canvas px/frame divided by zoom. Diagonal speed normalised (× 0.707). DM may zoom freely with the scroll wheel. Panning starts on key-press, stops on key-release. All keys suppressed when any text input has focus.
 
-### 9.4 PC Movement (discrete)
+### 9.4 PC Movement & Camera
 
-WASD / arrow keys -> `PLAYER_MOVE` for one orthogonal tile per press. Disabled when text input focused.
+WASD / arrow keys → `PLAYER_MOVE` for one orthogonal tile per press. Disabled when text input focused.
+
+**PC camera is locked to the player sprite** and recenters every frame — players cannot pan or zoom. The scroll wheel is ignored for PC clients. Movement keys are additionally blocked while a blocking interaction panel (Door or Stairs dialogue) is open.
 
 ### 9.5 DM Camera Centering
 
-- **New game**: DM viewport centres on the 4x4 initial grid (world point 2x64, 2x64) after 120 ms delay to allow canvas to size.
-- **Teleportation**: when a player moves > 1 cell Chebyshev distance (stairs / DM warp), camera centres client-side immediately.
+- **New game**: DM viewport centres on the 4x4 initial grid after 120 ms delay.
+- **Teleportation** (stairs/warp): camera centres client-side immediately for the teleporting PC.
+
+### 9.6 PC Disconnected — Main Menu Notice
+
+When the server connection drops (`DISCONNECTED` event), the PC is navigated back to the main menu and a top-centre Panel appears: **"Disconnected from server"** with a Close button.
 
 ---
 
@@ -784,7 +794,7 @@ NPC HP hits 0 -> 500 ms fade to black (10 steps x 50 ms). Cell occupant removed 
 | Type | Walkable | Color | Notes |
 |---|---|---|---|
 | Ground | Yes | `#ffffff` | Default; can hold objects; supports Y+drag walls |
-| Water | No | Blue (depth-shaded) | Cannot hold objects; NPCs/players cannot enter |
+| Water | No (for NPCs) | Blue (depth-shaded) | Cannot hold objects; NPCs cannot enter; **players can enter** (Drowning after 5 ticks — see §15.1) |
 | None (black) | No | `#000000` | Empty grid cell |
 
 ### 11.2 DM Tile Editing
@@ -827,7 +837,7 @@ The renderer uses tkinter's Canvas widget with individual draw calls (rectangle 
 - ~50 filled cells: mild frame-rate drop noticeable.
 - ~200+ filled cells: camera panning becomes jittery; tile spawn/delete operations slow noticeably.
 
-This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.11.2.
+This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.15.
 
 **Workaround:** middle-mouse drag (with a large brush size) over large regions deletes tiles quickly, reducing the cell count and restoring performance. The performance issue is **content-count-driven** (not content-type-driven — ground tiles without any shading cause the same drop as water tiles).
 
@@ -855,44 +865,31 @@ Objects cannot be spawned in protected cells. NPCs and objects can be dragged in
 | Item | Yes |
 | Door (Open) | Yes |
 | Door (Closed) | No |
-| Wall | No |
-| Stairs | Yes (triggers prompt on step-in) |
+| Wall | **No** (blocks like a closed door) |
+| Stairs | Yes (triggers prompt on step-in via WASD only) |
+| Water tile | **Yes** (Drowning mechanic after 5 ticks — see §15.1) |
 
-### 12.3 Spawn Object Dialog
-
-`SpawnObjectDialog` handles NPC and Item types only. (Door and Stairs have dedicated right-click spawn.) Sections use collapsible accordions; **General expanded by default**.
-
-**NPC General fields:** Name*, Description (3-line Text), Level, Size (combobox), Hostile (checkbox), Turns Allowed, Current HP (before Maximum HP), Maximum HP.
-
-**NPC Stats section:** six spinboxes (default 10 each), orange warning text when limits exceeded.
-
-**NPC Actions section:** +Add New Action / +Add Prefab Action; default "Unarmed Attack" row pre-seeded for new NPCs.
-
-**Item General:** Name*, Description, Level, Quantity, Value (g), Consumable, Equipment Slot.
-
-**Item sections:** Scalars (per-stat grade dropdowns), Stat Modifiers (per-stat int, default 0), Actions.
-
-*Required.
-
-### 12.4 Action Row Fields
+### 12.3 Action Row Fields
 
 Per action row (shared by NPC/Item Spawn dialog and Action prefab editor):
 - Name, Description (2-line textarea), Range, Dmg, Hits
 - `[  ] Limited Uses (Casts)` -> Max/rest, Remaining (hidden until checked)
-- `[  ] Applies Buffs` -> list of buff defs (+New Buff / +Prefab Buff)
-- `[  ] Scales With Stat` -> per-stat grade dropdowns (NPC forms and Action prefabs; Items use item-level Scalars instead)
+- `[  ] Applies Buffs` -> list of buff defs (`+Buff` loads from session + disk Buff prefabs)
+- `[  ] Scales With Stat` -> per-stat grade dropdowns (NPC forms and Action prefabs only)
 
-### 12.5 DM Right-Click Context Menu (out of combat)
+### 12.4 DM Right-Click Context Menu (out of combat)
 
 **On unoccupied non-protected ground:**
-- Spawn Object (NPC/Item dialog)
+- **Spawn Object** — opens `SpawnFromPrefabsDialog` (tabbed NPC/Item table with search bar); places the selected prefab as a new instance
 - Spawn Door (default: closed, unlocked, intact)
 - Spawn Stairs (default: Up, no link)
-- Spawn Prefab... (if prefabs loaded; NPC/Item only)
+- Spawn Prefab... (shown only when `GameScreen.prefabs` is non-empty; opens full prefab picker)
 - Warp Players Here (if >= 16 contiguous tiles in the connected component)
 
 **On NPC:**
 - Modify Object, Delete Object
+- **Modify Current HP** — in-app panel: enter signed integer delta; positive = heal (clamped to MaxHP), negative = damage; `<= 0` triggers full death path (DM_DELETE_OBJECT)
+- **Speak as NPC…** — opens a right-side Panel with a textarea; submitting sends `DM_CHAT_AS_NPC` so the NPC speaks in chat under its own name. Replaces the old `/as` command.
 - Add To Encounter / Remove From Encounter
 - Actions -> submenu (with combat-aware Casts display)
 
@@ -956,15 +953,42 @@ Auto-end fires immediately after the triggering move/action — no manual "End T
 - Right-click NPC -> Actions submenu -> target selection.
 - SPACE or "End NPC Turn" in Turn Order Panel -> `DM_NPC_END_TURN`.
 
-### 13.5 Damage Formula
+### 13.5 Stat Modifier Formula
+
+All stat-based bonuses use the **standard D&D ability score modifier**:
 
 ```python
+def stat_mod(stat_value: int) -> int:
+    return (stat_value - 10) // 2   # floor division; negatives handled correctly
+```
+
+Examples: 6→-2, 8→-1, 10→0, 12→+1, 14→+2, 16→+3, 18→+4, 20→+5
+
+### 13.6 HP Formula
+
+```python
+def calc_max_hp(size: str, level: int, con: int, multiplier: float) -> int:
+    size_val = HEALTH_SIZE_LOOKUP[size]          # see §4.1
+    con_mod  = stat_mod(con)
+    per_level_base = max(1, size_val + con_mod)  # never < 1 so level always helps
+    return max(1, ceil(multiplier * level * per_level_base))
+```
+
+A higher Level **always** produces more HP regardless of Con. Negative Con modifiers reduce the per-level base but it is clamped to ≥ 1.
+
+### 13.7 Damage Formula
+
+```python
+# Ability score modifier helper (see §13.5)
+# stat_mod(v) = (v - 10) // 2
+
 # Default (unarmed) attack — always available
-dmg = max(max(Dex, Str) - 20, 0) + ceil(Level * 1.5)
+best_mod = stat_mod(max(Dex, Str))
+dmg = max(1, best_mod + ceil(Level * 1.5))
 
 # Weapon/spell action
 scalar_total = sum(
-    ceil(max(combatant.Stats.get(stat, 0) - 20, 0) * (1 + SCALAR_WEIGHT[weight]))
+    ceil(stat_mod(combatant.Stats.get(stat, 0)) * (1 + SCALAR_WEIGHT[weight]))
     for stat, weight in (action_scalars or {}).items()
 )
 dmg_per_hit = scalar_total + BaseDamage
@@ -982,7 +1006,14 @@ if total > 0 and def_mod:
 # Negative total = healing
 ```
 
-### 13.6 Turn End Processing
+### 13.8 Initiative Formula
+
+```python
+dex_mod = stat_mod(combatant.Stats.get("Dex", 0))
+initiative = dex_mod + random.randint(1, 20)
+```
+
+### 13.9 Turn End Processing
 
 At the end of every combatant's turn (`PLAYER_END_TURN` or `DM_NPC_END_TURN`):
 1. Apply HP Over Time buffs individually (heals before damage) — see §14.
@@ -990,11 +1021,11 @@ At the end of every combatant's turn (`PLAYER_END_TURN` or `DM_NPC_END_TURN`):
 3. Broadcast STATE_PATCH with entity update.
 4. Advance to next turn (`advance_turn(combat)`).
 
-### 13.7 Long Rest (DM button)
+### 13.10 Long Rest (DM button)
 
 Resets all `action["Casts"]["remaining"] = max_per_rest` for every Action on every player and NPC. Broadcasts STATE_PATCH + system chat.
 
-### 13.8 Combat Chat
+### 13.11 Combat Chat
 
 | Event | Tag | Color |
 |---|---|---|
@@ -1039,7 +1070,21 @@ Via `Action.GivesBuffs` list — applied to the target on hit (fizzle does NOT a
 
 `PlayerObject.Buffs` and `NPC.Buffs` are both `List[dict]`. Old saves with legacy `Dict[str, dict]` format are automatically migrated in `from_dict()`. Effective stat calculation uses Stat Modifier buffs from this list.
 
-### 14.6 Removed Hardcoded Buffs
+### 14.6 Saving Throws (optional per-buff)
+
+A buff may carry:
+```python
+"HasSavingThrow": True,
+"SavingThrow":    {"Con": 12}   # stat key -> DC threshold
+```
+
+Before the buff ticks (applies its effect or ticks its duration), the server rolls:
+```
+roll = stat_mod(entity.Stats[stat]) + randint(1, 20)
+```
+If `roll >= threshold` for any non-zero SavingThrow entry, the buff is **immediately removed** without applying its effect. A system chat message announces the successful save: `"{name} succeeded a saving throw for [{buff_name}]."`.
+
+### 14.7 Removed Hardcoded Buffs
 
 "Poison" and "Burn" as hardcoded buff types no longer exist. Their behavior is replicated via HP Over Time (for damage) combined with Stat Modifier buffs (for stat penalties) through the Action GivesBuffs system.
 
@@ -1050,30 +1095,47 @@ Via `Action.GivesBuffs` list — applied to the target on hit (fizzle does NOT a
 ### 15.1 Movement
 
 PC moves to an **orthogonally adjacent** cell that is:
-- `walkable = True` (ground tile with `tile_type = "ground"`)
-- Not occupied by NPC, Wall, or another Player
+- `walkable = True` (ground tile `tile_type = "ground"`) **or** `tile_type = "water"` (players may walk on water)
+- Not occupied by NPC, **Wall**, or another Player
 - Not a Door with `Open = False`
 
-Via WASD / arrow keys, or left-click adjacent cell.
+Via WASD / arrow keys (also triggers `PLAYER_MOVE`; panning is not available to PC), or left-click adjacent cell.
+
+**Movement is blocked** while a Door or Stairs confirmation panel is open.
+
+#### Water & Drowning
+
+- Players may freely step onto water tiles.
+- The server tracks consecutive ticks spent on water per player (`_water_ticks`).
+- After **5 ticks** (turn-ends in combat, or 60-second real-time ticks out of combat), a **"Drowning"** buff is applied:
+  ```python
+  {"Name": "Drowning", "Type": "HP Over Time",
+   "Value": -int(hp_base_multiplier), "Duration": 99999.0}
+  ```
+  Damage equals the session's `hp_base_multiplier` per tick.
+- When a player **steps off water** (server-side, on the PLAYER_MOVE handler), Drowning is removed immediately and the water tick counter resets to 0.
+- NPCs cannot walk on water (no special case in DM_NPC_MOVE).
 
 ### 15.2 Cell Interactions (left-click adjacent; 8 directions)
 
 | Cell content | Interaction |
 |---|---|
-| Door | DoorInteractionDialog (Open/Close; locked check; broken = disabled) |
+| Door | `DoorInteractionDialog` opens at **top-centre** (background stays visible). Locked door shows error; broken door disables button. |
 | NPC | Context: Inspect / Action |
 | Item | Context: Pick Up / Inspect |
 | Player | Show PlayerStatsTooltip |
 
 **Left-click own cell** when standing on Stairs or Item: Ground interaction.
-- Stairs: re-trigger StairPromptDialog.
+- Stairs: re-trigger `StairPromptDialog` (top-centre, background visible). Note: prompt is **only shown when stepping onto stairs via WASD** — teleporting to a paired stair does NOT trigger the prompt.
 - Item: Pick Up / Inspect.
 
 ### 15.3 Keys
 
 | Key | Action |
 |---|---|
-| WASD / Arrows | Move (PC) / Pan camera (DM, smooth hold) |
+| WASD / Arrows (PC) | Move player one tile |
+| WASD / Arrows (DM) | Smooth camera pan (hold to repeat) |
+| Scroll wheel (DM only) | Zoom in/out (ignored for PC) |
 | ESC | Toggle ESC menu |
 | TAB or O | Toggle Player List overlay |
 | B | Toggle Inventory |
@@ -1083,7 +1145,7 @@ Via WASD / arrow keys, or left-click adjacent cell.
 | ESC (chat focused) | Blur chat, do not send |
 | ENTER (chat focused) | Send message |
 | TAB (chat focused, after /) | Autocomplete |
-| Scroll wheel | Zoom in/out |
+| [ / ] (DM only) | Decrease / increase paintbrush size |
 
 All keys suppressed when any `tk.Entry` or `tk.Text` has keyboard focus. ESC, TAB/O, B, C all **toggle** — pressing again closes the panel.
 
@@ -1127,7 +1189,11 @@ Right-click walkable cell in a connected component of >= 16 tiles -> "Warp Playe
 - **End Combat**: clears active flag; encounter_npc_ids preserved.
 - **Long Rest**: resets all Casts remaining.
 
-### 16.6 DM ESC Menu
+### 16.6 NPC Chat Impersonation (out of combat)
+
+DM right-click any NPC → **Speak as NPC…** opens a right-side Panel with a multi-line textarea. Submitting sends `DM_CHAT_AS_NPC{npc_id, text}`. The server broadcasts a normal-type chat message with `sender_alias = NPC.Name` and tags it as an NPC message.
+
+### 16.7 DM ESC Menu
 
 | Option | Notes |
 |---|---|
@@ -1196,11 +1262,13 @@ All changes broadcast in a single STATE_PATCH.
 
 ### 18.3 Player Traversal
 
-When PC moves onto a Stairs cell:
+When PC **steps onto a Stairs cell via WASD** (Chebyshev distance == 1):
 1. Server broadcasts STATE_PATCH (player moved).
-2. Client detects move > 1 cell Chebyshev distance -> 60 ms delay -> `StairPromptDialog`.
+2. Client detects `dist == 1` step-onto-stairs -> 60 ms delay -> `StairPromptDialog`.
 
-**StairPromptDialog**: centered panel with dark backdrop. "Proceed up/down the stairs?" + Yes / No.
+Teleportation (PLAYER_TAKE_STAIRS arriving at destination) does **not** retrigger the prompt.
+
+**StairPromptDialog**: `Panel` subclass with `placement="top"` — appears at top-centre of the screen; no dark backdrop, game canvas stays fully visible. "Proceed up/down the stairs?" + Yes / No.
 - **Yes + LinkedStair set**: `PLAYER_TAKE_STAIRS{stair_id}` -> server validates, moves player to destination, STATE_PATCH + CAMERA_CENTER.
 - **No**: closes; player stays.
 
@@ -1243,20 +1311,33 @@ Dimensions: 380x180 px. Placed bottom-left, floating over canvas.
 |---|---|
 | `/y <msg>` | Yell (broadcast, salmon) |
 | `/w <alias> <msg>` | Whisper (private, both see it) |
-| `/as <NPC.Name> <msg>` | DM: speak in chat as NPC (normal) |
-| `/as <NPC.Name> -y <msg>` | DM: yell as NPC |
-| `/as <NPC.Name> -w <alias> <msg>` | DM: whisper as NPC |
+| `/r` | Pre-fill entry with `/w <last_whisper_sender> ` |
+| `/r <msg>` | Reply directly to last whisper sender |
 | `/help` | Local help text (not sent to server) |
 
-Tab autocomplete in chat cycles commands, then player/NPC names for second argument.
+Tab autocomplete cycles: `/y `, `/w `, `/r `, `/help`. Pressing TAB a second time expands to player/NPC alias after `/w `.
+
+The `/as` command has been **removed**. Use the "Speak as NPC…" right-click menu item instead (see §16.6).
 
 ### 19.4 NPC Impersonation
 
-DM combat: when it is an NPC's turn, chat entry shows `[As <NPC.Name>]` prefix; messages auto-route as NPC speech. Clears when NPC's turn ends.
+Two paths for DM to speak as an NPC:
 
-### 19.5 Chat Persistence
+- **Combat auto-impersonation**: when it is an NPC's turn in combat, the chat entry shows `[As <NPC.Name>]` prefix; messages auto-route as NPC speech (`DM_CHAT_AS_NPC`). Clears when the NPC's turn ends.
+- **Out-of-combat**: right-click NPC → **Speak as NPC…** (see §16.6).
 
-All messages except whispers stored in `GameState.chat_history`. Replayed on load. `/as` NPC messages saved with `sender_alias = NPC.Name`.
+### 19.5 Chat Bubbles
+
+A text bubble appears above the entity sprite for 3 seconds after a message is sent:
+
+- **Follows the entity**: bubble position is resolved every render frame from the entity's current cell, so bubbles follow moving players and NPCs.
+- **Whispers**: bubble shown only on the sender's and recipient's client.
+- **DM messages**: the DM does **not** get a chat bubble for their own out-of-character speech. When the DM speaks as an NPC (via "Speak as NPC…" or combat auto-impersonation), the NPC's sprite gets the bubble.
+- **Player aliases** must not contain spaces (enforced in Profile screen).
+
+### 19.6 Chat Persistence
+
+All messages except whispers stored in `GameState.chat_history`. Replayed on load. NPC impersonation messages saved with `sender_alias = NPC.Name`.
 
 ---
 
@@ -1363,7 +1444,7 @@ All runtime data goes to `%APPDATA%\Steel2D\` (frozen) or project root (dev):
 | `ESC` (chat focused) | Blur chat (no send) |
 | `ENTER` (chat focused) | Send message |
 | `TAB` (chat, after `/`) | Autocomplete command / alias |
-| Scroll wheel | Zoom in/out centred on cursor |
+| Scroll wheel | Ignored (PC camera is always locked; no zoom) |
 
 ### Game Screen — DM
 
@@ -1384,4 +1465,4 @@ All runtime data goes to `%APPDATA%\Steel2D\` (frozen) or project root (dev):
 
 ---
 
-*End of Requirements Document v0.11.0*
+*End of Requirements Document v0.15*

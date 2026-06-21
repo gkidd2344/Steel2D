@@ -39,6 +39,7 @@ class App(tk.Tk):
             parent,
             user_config=self._user_config,
             on_profile=self.show_profile,
+            on_character=self.show_character_editor,
             on_dm_tool=self.show_dm_tool,
             on_host=self._host_flow,
             on_join=self._join_flow,
@@ -68,6 +69,19 @@ class App(tk.Tk):
         from screens.dm_tool import DmToolScreen
         return DmToolScreen(parent, on_exit=self.show_main_menu)
 
+    # ── character editor ──────────────────────────────────────────────────────
+
+    def show_character_editor(self) -> None:
+        self._swap_screen(lambda p: self._make_character_editor(p))
+
+    def _make_character_editor(self, parent):
+        from screens.character_editor import CharacterEditorScreen
+        return CharacterEditorScreen(parent, on_save=self._on_character_saved,
+                                     on_cancel=self.show_main_menu)
+
+    def _on_character_saved(self) -> None:
+        self.show_main_menu()
+
     # ── host / join flows ─────────────────────────────────────────────────────
 
     def _host_flow(self) -> None:
@@ -78,20 +92,23 @@ class App(tk.Tk):
             on_load_game=self._load_game_flow,
         )
 
-    def _new_game_flow(self) -> None:
-        from dialogs.new_game_settings import NewGameSettingsDialog
-        NewGameSettingsDialog(self, on_start=self._start_new_game)
+    def _new_game_flow(self, password: str = "") -> None:
+        from app.config import load_game_config
+        from game.state import GameSettings, make_initial_state
+        cfg = load_game_config()
+        settings = GameSettings(
+            hp_base_multiplier=float(cfg.get("hp_base_multiplier", 4.0)),
+            enemy_damage_multiplier=float(cfg.get("enemy_damage_multiplier", 1.0)),
+            los_max_distance=int(cfg.get("los_max_distance", 20)),
+        )
+        state = make_initial_state("Untitled", settings)
+        self._launch_dm_game(state, password=password)
 
-    def _start_new_game(self, name: str, settings) -> None:
-        from game.state import make_initial_state
-        state = make_initial_state(name, settings)
-        self._launch_dm_game(state)
-
-    def _load_game_flow(self) -> None:
+    def _load_game_flow(self, password: str = "") -> None:
         from dialogs.load_game_dialog import LoadGameDialog
-        LoadGameDialog(self, on_load=self._launch_dm_game)
+        LoadGameDialog(self, on_load=lambda state: self._launch_dm_game(state, password=password))
 
-    def _launch_dm_game(self, state) -> None:
+    def _launch_dm_game(self, state, password: str = "") -> None:
         self._load_all_prefabs()       # populate self.prefabs before game starts
 
         self._ui_queue = queue.Queue()
@@ -100,7 +117,8 @@ class App(tk.Tk):
         port = self._user_config.get("preferred_port", 5000)
 
         from network.server import GameServer
-        server = GameServer(state, self._ui_queue, port, host_uuid=uid)
+        server = GameServer(state, self._ui_queue, port, host_uuid=uid,
+                            password=password, prefabs=list(self.prefabs))
         server.start()
         self._server = server
 
@@ -112,6 +130,7 @@ class App(tk.Tk):
             player_uuid=uid,
             alias=alias,
             avatar_b64=self._user_config.get("avatar_b64"),
+            # DM does not send character data; they have no player object
         )
         client.start()
         self._client = client
@@ -142,10 +161,17 @@ class App(tk.Tk):
         from dialogs.join_dialog import JoinDialog
         JoinDialog(self, on_join=self._connect_as_player)
 
-    def _connect_as_player(self, host: str, port: int) -> None:
+    def _connect_as_player(self, host: str, port: int, password: str = "") -> None:
+        # Remember join params in case we need to re-open on wrong password
+        self._last_join_host = host
+        self._last_join_port = port
+
         self._ui_queue = queue.Queue()
         uid = self._user_config["uuid"]
         alias = self._user_config.get("alias", "Player")
+
+        from app.config import load_character
+        character_data = load_character()   # None if no character file yet
 
         from network.client import GameClient
         client = GameClient(
@@ -153,6 +179,8 @@ class App(tk.Tk):
             player_uuid=uid,
             alias=alias,
             avatar_b64=self._user_config.get("avatar_b64"),
+            password=password,
+            character_data=character_data,
         )
         client.start()
         self._client = client
@@ -181,7 +209,19 @@ class App(tk.Tk):
             pass
 
         if event_type == "REJECT":
-            messagebox.showerror("Rejected", payload.get("reason", "Connection refused."))
+            reason = payload.get("reason", "")
+            if reason == "incorrect_password":
+                # Re-open join dialog with same host/port, cleared password, error shown
+                from dialogs.join_dialog import JoinDialog
+                JoinDialog(
+                    self,
+                    on_join=self._connect_as_player,
+                    prefill_host=getattr(self, "_last_join_host", "127.0.0.1"),
+                    prefill_port=getattr(self, "_last_join_port", 5000),
+                    error="Provided password was incorrect.",
+                )
+                return
+            messagebox.showerror("Rejected", reason or "Connection refused.")
             self.show_main_menu()
             return
         if event_type in ("CONNECTION_FAILED", "DISCONNECTED"):
@@ -197,10 +237,21 @@ class App(tk.Tk):
         state = GameState.from_dict(payload["game_state"])
         uid = self._user_config["uuid"]
 
+        # ── Persist host prefabs locally (merge, never delete old entries) ────
+        host_uuid    = payload.get("host_uuid", "")
+        host_prefabs = payload.get("host_prefabs") or []
+        if host_uuid and host_prefabs:
+            try:
+                from app.config import merge_host_prefabs
+                merge_host_prefabs(host_uuid, host_prefabs)
+            except Exception:
+                pass   # non-fatal: game still works without local prefab cache
+
         from screens.game import GameScreen
         self._swap_screen(lambda p: GameScreen(
             p, state, self._client, None, self._ui_queue,
             local_uuid=uid, is_dm=False,
+            host_uuid=host_uuid,   # DM's UUID for correct chat colour-coding
         ))
 
     def _join_failed(self, reason: str) -> None:

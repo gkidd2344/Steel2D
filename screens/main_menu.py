@@ -20,6 +20,7 @@ class MainMenuScreen(tk.Frame):
                  on_join: Callable,
                  on_quit: Callable,
                  on_dm_tool: Callable = None,
+                 on_character: Callable = None,
                  **kwargs):
         super().__init__(parent, bg=PALETTE["bg"], **kwargs)
         self._user_config = user_config
@@ -28,6 +29,7 @@ class MainMenuScreen(tk.Frame):
         self._on_join = on_join
         self._on_quit = on_quit
         self._on_dm_tool = on_dm_tool
+        self._on_character = on_character
         self._avatar_img = None
         self._build()
 
@@ -50,7 +52,7 @@ class MainMenuScreen(tk.Frame):
         # Title
         tk.Label(card, text="STEEL2D", bg=PALETTE["card"],
                  fg=PALETTE["fg"], font=FONTS["title"]).pack()
-        tk.Label(card, text="v0.11.2  ·  multiplayer tabletop lobby",
+        tk.Label(card, text="v0.15  ·  multiplayer tabletop lobby",
                  bg=PALETTE["card"], fg=PALETTE["muted"],
                  font=FONTS["small"]).pack(pady=(0, 6))
         hr(card).pack(fill=tk.X, pady=8)
@@ -75,12 +77,26 @@ class MainMenuScreen(tk.Frame):
         profile_row = tk.Frame(card, bg=PALETTE["card"])
         profile_row.pack(fill=tk.X, pady=(0, 4))
 
+        profile_row.grid_columnconfigure(0, weight=1)
+        profile_row.grid_columnconfigure(1, weight=1)
+
         flat_btn(
             profile_row,
             f"👤  {profile_label}",
             self._on_profile,
             style="ghost"
-        ).pack(fill=tk.X, ipady=4)
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=4)
+
+        if self._on_character:
+            from app.config import get_character_path
+            has_char = get_character_path().exists()
+            char_label = "Edit Character" if has_char else "Create Character"
+            flat_btn(
+                profile_row,
+                f"⚔  {char_label}",
+                self._on_character,
+                style="ghost"
+            ).grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
 
         # ── Hint row ──────────────────────────────────────────────────────────
         if not has_profile:

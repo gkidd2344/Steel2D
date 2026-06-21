@@ -58,6 +58,7 @@ class ChatWidget(tk.Frame):
         self.host_uuid = host_uuid
         self._auto_scroll = True
         self._npc_impersonate: Optional[str] = None
+        self._last_whisper_from: Optional[str] = None   # alias of last incoming whisper
         self._tab_idx = 0
 
         self.pack_propagate(False)
@@ -161,6 +162,11 @@ class ChatWidget(tk.Frame):
             self._text.insert(tk.END, content + "\n", tag)
         elif msg_type == "whisper":
             self._text.insert(tk.END, content + "\n", "whisper_in")
+            # Track sender for /r reply (incoming whispers start with "[Alias]:", outgoing with "[To ")
+            if not content.startswith("[To ") and content.startswith("["):
+                end = content.find("]")
+                if end > 0:
+                    self._last_whisper_from = content[1:end]
         elif msg_type == "yell":
             self._text.insert(tk.END, display_name, name_tag)
             self._text.insert(tk.END, f" yells: {content}\n", "yell")
@@ -213,21 +219,22 @@ class ChatWidget(tk.Frame):
             self._entry_var.set("")
             return "break"
 
-        if text.startswith("/as ") and self.is_dm:
-            rest = text[4:]
-            if " -w " in rest:
-                npc_name, rest2 = rest.split(" -w ", 1)
-                parts = rest2.split(" ", 1)
-                if len(parts) == 2:
-                    self.on_send(parts[1], "whisper", npc_name.strip(),
-                                 recipient_alias=parts[0])
+        # /r — reply to last whisper
+        if text == "/r":
+            if self._last_whisper_from:
+                self._entry_var.set(f"/w {self._last_whisper_from} ")
+                self._entry.icursor(tk.END)
             else:
-                parts = rest.split(" ", 1)
-                if len(parts) == 2:
-                    self.on_send(parts[1], "normal", parts[0].strip())
-                elif len(parts) == 1:
-                    self.on_send("", "normal", parts[0].strip())
-            self._entry_var.set("")
+                self.add_local("No recent whisper to reply to.", "system")
+            return "break"
+        if text.startswith("/r "):
+            if self._last_whisper_from:
+                self.on_send(text[3:].strip(), "whisper",
+                             recipient_alias=self._last_whisper_from)
+                self._entry_var.set("")
+            else:
+                self.add_local("No recent whisper to reply to.", "system")
+                self._entry_var.set("")
             return "break"
 
         if text.startswith("/y "):
@@ -250,7 +257,7 @@ class ChatWidget(tk.Frame):
         text = self._entry_var.get()
         if not text.startswith("/"):
             return "break"
-        commands = ["/y ", "/w ", "/as ", "/help"]
+        commands = ["/y ", "/w ", "/r ", "/help"]
         prefix = text.lstrip("/")
         candidates = [c for c in commands if c.lstrip("/").startswith(prefix)]
         if candidates:
@@ -267,10 +274,11 @@ class ChatWidget(tk.Frame):
             self._auto_scroll = True
 
     def _show_help(self) -> None:
-        lines = ["/y <msg>  — Yell", "/w <alias> <msg>  — Whisper"]
-        if self.is_dm:
-            lines += ["/as <NPC> <msg>  — Speak as NPC [DM only]",
-                      "/as <NPC> -w <a> <msg>  — Whisper as NPC [DM only]"]
-        lines.append("/help  — This help")
+        lines = [
+            "/y <msg>       — Yell",
+            "/w <alias> <msg>  — Whisper",
+            "/r [msg]       — Reply to last whisper",
+            "/help          — This help",
+        ]
         for line in lines:
             self.add_local(line, "system")

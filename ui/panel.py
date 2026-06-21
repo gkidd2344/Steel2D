@@ -21,7 +21,8 @@ from app.constants import PALETTE
 class Panel(tk.Frame):
     _closing = False
 
-    def __init__(self, parent, padx: int = 0, pady: int = 0, **kwargs):
+    def __init__(self, parent, padx: int = 0, pady: int = 0,
+                 placement: str = "right", **kwargs):
         root = parent.winfo_toplevel()
 
         # Remove keys Panel shouldn't forward to Frame
@@ -37,8 +38,12 @@ class Panel(tk.Frame):
             **kwargs,
         )
 
-        # Float on the right side, vertically centred
-        self.place(relx=1.0, x=-10, rely=0.5, anchor="e")
+        if placement == "top":
+            # Top-centre — used for short blocking confirmations (Door, Stairs, etc.)
+            self.place(relx=0.5, rely=0.0, y=16, anchor="n")
+        else:
+            # Right-centre — default for most panels
+            self.place(relx=1.0, x=-10, rely=0.5, anchor="e")
         self.lift()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────

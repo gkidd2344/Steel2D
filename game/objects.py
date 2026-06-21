@@ -165,7 +165,10 @@ class Door:
 class PlayerObject:
     id: str
     type: str = "Player"
-    Name: str = ""
+    Name: str = ""         # PlayerAlias (shown in chat, session display name)
+    CharacterName: str = "" # In-world character name
+    Class: str = ""
+    Backstory: str = ""
     Size: str = "Medium"
     Level: int = 1
     MaximumHP: int = 24
@@ -184,6 +187,9 @@ class PlayerObject:
             "id": self.id,
             "type": self.type,
             "Name": self.Name,
+            "CharacterName": self.CharacterName,
+            "Class": self.Class,
+            "Backstory": self.Backstory,
             "Size": self.Size,
             "Level": self.Level,
             "MaximumHP": self.MaximumHP,
@@ -206,6 +212,9 @@ class PlayerObject:
             id=d["id"],
             type=d.get("type", "Player"),
             Name=d.get("Name", ""),
+            CharacterName=d.get("CharacterName", ""),
+            Class=d.get("Class", ""),
+            Backstory=d.get("Backstory", ""),
             Size=d.get("Size", "Medium"),
             Level=d.get("Level", 1),
             MaximumHP=d.get("MaximumHP", 24),

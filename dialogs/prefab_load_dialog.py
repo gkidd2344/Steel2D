@@ -48,13 +48,13 @@ class PrefabLoadDialog(Panel):
         flat_btn(hdr, "✕", self.close, style="ghost").pack(side=tk.RIGHT)
         hr(self).pack(fill=tk.X)
 
-        # Column headers
+        # Column headers — Name and Date at equal 50 % widths
         col_hdr = tk.Frame(self, bg=PALETTE["card2"], padx=10, pady=4)
         col_hdr.pack(fill=tk.X)
-        for col, w in [("Name", 20), ("Date", 20), ("Objects", 8)]:
+        for col in ("Name", "Date"):
             tk.Label(col_hdr, text=col, bg=PALETTE["card2"],
-                     fg=PALETTE["muted"], font=FONTS["small"],
-                     width=w, anchor="w").pack(side=tk.LEFT, padx=2)
+                     fg="#ffffff", font=FONTS["form_label"],
+                     anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
         list_frame = tk.Frame(self, bg=PALETTE["card"],
                               width=420, height=300)
@@ -86,14 +86,10 @@ class PrefabLoadDialog(Panel):
             self._row_frames.append(row)
 
             updated = meta["updated_at"][:19].replace("T", " ") if meta["updated_at"] else "—"
-            for val, w in [
-                (meta["name"][:20], 20),
-                (updated[:20], 20),
-                (str(meta["count"]), 8),
-            ]:
+            for val in (meta["name"], updated):
                 tk.Label(row, text=val, bg=bg, fg=PALETTE["fg"],
-                         font=FONTS["body"], width=w,
-                         anchor="w", padx=8).pack(side=tk.LEFT)
+                         font=FONTS["body"], anchor="w",
+                         padx=8).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
             def _select(e, idx=i, r=row):
                 self._select_row(idx, r)

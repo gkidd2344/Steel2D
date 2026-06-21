@@ -29,7 +29,7 @@ class NewGameSettingsDialog(Panel):
             row=0, column=1, pady=5, padx=(10, 0), sticky="w")
 
         fields = [
-            ("HP Base Multiplier",  "hp_base_multiplier",      cfg.get("hp_base_multiplier", 6.0)),
+            ("HP Base Multiplier",  "hp_base_multiplier",      cfg.get("hp_base_multiplier", 4.0)),
             ("Enemy Damage Mult.",  "enemy_damage_multiplier", cfg.get("enemy_damage_multiplier", 1.0)),
             ("LOS Max Distance",    "los_max_distance",        cfg.get("los_max_distance", 20)),
         ]

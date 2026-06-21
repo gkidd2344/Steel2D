@@ -140,6 +140,11 @@ class ProfileScreen(tk.Frame):
 
     def _save(self) -> None:
         alias = self._alias_var.get().strip()[:32]
+        if " " in alias:
+            from tkinter import messagebox
+            messagebox.showerror("Invalid Alias",
+                                 "Player aliases cannot contain spaces.")
+            return
         self._user_config["alias"] = alias
         self._user_config["avatar_b64"] = self._pending_b64
         save_user_config(self._user_config)

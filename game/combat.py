@@ -3,8 +3,9 @@ from game.state import CombatState, CombatTurn, MOVE_COST, ACTION_COST, TURN_THR
 
 
 def roll_initiative(combatant) -> int:
-    dex_bonus = max(combatant.Stats.get("Dex", 0) - 20, 0)
-    return dex_bonus + random.randint(1, 20)
+    from game.stats import stat_mod
+    dex_mod = stat_mod(combatant.Stats.get("Dex", 0))
+    return dex_mod + random.randint(1, 20)
 
 
 def build_turn_queue(players: dict, npc_cells: list) -> list:
@@ -18,7 +19,11 @@ def build_turn_queue(players: dict, npc_cells: list) -> list:
     turns = []
 
     for uid, player in players.items():
-        extra = int(player.Buffs.get("Agility", {}).get("Value", 0)) if hasattr(player, "Buffs") else 0
+        # Buffs is List[dict] — count active Turn Modifier buffs
+        buffs = getattr(player, "Buffs", [])
+        extra = (sum(b.get("Value", 0) for b in buffs
+                     if isinstance(b, dict) and b.get("Type") == "Turn Modifier")
+                 if isinstance(buffs, list) else 0)
         slots = 1 + extra
         for _ in range(slots):
             init = roll_initiative(player)

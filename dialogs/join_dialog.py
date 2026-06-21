@@ -6,9 +6,15 @@ from ui.widgets import flat_btn, styled_entry, hr
 
 
 class JoinDialog(Panel):
-    def __init__(self, parent, on_join: Callable):
+    def __init__(self, parent, on_join: Callable,
+                 prefill_host: str = "127.0.0.1",
+                 prefill_port: int = DEFAULT_PORT,
+                 error: str = ""):
         super().__init__(parent, padx=28, pady=20)
         self._on_join = on_join
+        self._prefill_host = prefill_host
+        self._prefill_port = prefill_port
+        self._error = error
         self._build()
 
     def _build(self) -> None:
@@ -21,25 +27,35 @@ class JoinDialog(Panel):
         tk.Label(form, text="Host IP / Address", bg=PALETTE["card"],
                  fg=PALETTE["fg_dim"], font=FONTS["small"]).grid(
             row=0, column=0, sticky="w", pady=5)
-        self._host_var = tk.StringVar(value="127.0.0.1")
+        self._host_var = tk.StringVar(value=self._prefill_host)
         styled_entry(form, textvariable=self._host_var, width=26).grid(
             row=0, column=1, pady=5, padx=(10, 0))
 
         tk.Label(form, text="Port", bg=PALETTE["card"],
                  fg=PALETTE["fg_dim"], font=FONTS["small"]).grid(
             row=1, column=0, sticky="w", pady=5)
-        self._port_var = tk.StringVar(value=str(DEFAULT_PORT))
+        self._port_var = tk.StringVar(value=str(self._prefill_port))
         styled_entry(form, textvariable=self._port_var, width=8).grid(
             row=1, column=1, sticky="w", pady=5, padx=(10, 0))
 
-        self._err_var = tk.StringVar()
+        tk.Label(form, text="Password", bg=PALETTE["card"],
+                 fg=PALETTE["fg_dim"], font=FONTS["small"]).grid(
+            row=2, column=0, sticky="w", pady=5)
+        self._pwd_var = tk.StringVar()   # always blank (cleared on re-open)
+        styled_entry(form, textvariable=self._pwd_var, width=22,
+                     show="•").grid(
+            row=2, column=1, sticky="w", pady=5, padx=(10, 0))
+
+        # Error label (shown when password was wrong)
+        self._err_var = tk.StringVar(value=self._error)
         tk.Label(self, textvariable=self._err_var, bg=PALETTE["card"],
                  fg=PALETTE["danger"], font=FONTS["small"]).pack(pady=(6, 0))
 
         hr(self).pack(fill=tk.X, pady=(10, 8))
         btn_row = tk.Frame(self, bg=PALETTE["card"])
         btn_row.pack(anchor="e")
-        flat_btn(btn_row, "Join", self._do_join, style="normal").pack(side=tk.LEFT, padx=(0, 8))
+        flat_btn(btn_row, "Join", self._do_join, style="normal").pack(
+            side=tk.LEFT, padx=(0, 8))
         flat_btn(btn_row, "Cancel", self.close, style="ghost").pack(side=tk.LEFT)
 
         self.bind("<Return>", lambda e: self._do_join())
@@ -54,5 +70,6 @@ class JoinDialog(Panel):
         if not host:
             self._err_var.set("Please enter a host address.")
             return
+        pwd = self._pwd_var.get()
         self.close()
-        self._on_join(host, port)
+        self._on_join(host, port, pwd)

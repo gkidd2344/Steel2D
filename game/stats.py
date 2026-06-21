@@ -7,6 +7,17 @@ if TYPE_CHECKING:
     from game.objects import PlayerObject, NPC
 
 
+def stat_mod(stat_value: int) -> int:
+    """
+    Standard D&D ability score modifier: floor((stat - 10) / 2).
+
+    Examples (pairs sharing the same modifier):
+        4-5 → -3,  6-7 → -2,  8-9 → -1,  10-11 → 0,
+        12-13 → +1,  14-15 → +2,  16-17 → +3,  18-19 → +4, …
+    """
+    return (stat_value - 10) // 2   # Python // is floor-division; handles negatives correctly
+
+
 def max_individual(level: int) -> int:
     return 18 + level * 2
 
@@ -27,9 +38,15 @@ def clamp_stats(stats: dict, level: int) -> dict:
 
 
 def calc_max_hp(size: str, level: int, con: int, multiplier: float) -> int:
-    size_val = HEALTH_SIZE_LOOKUP.get(size, 4)
-    con_bonus = max(con - 20, 0)
-    return max(1, math.ceil(multiplier * (size_val + level * con_bonus)))
+    """
+    HP = ceil(multiplier × (size_bonus + con_bonus))
+
+    Level always contributes: a higher level with the same Con and Size will
+    always have more HP.
+    """
+    size_bonus = max(1, level * HEALTH_SIZE_LOOKUP.get(size, 2))
+    con_bonus = level * stat_mod(con) if stat_mod(con) > 0 else (math.ceil(math.sqrt(level))) * stat_mod(con)
+    return max(1, math.ceil(multiplier * (size_bonus + con_bonus)))
 
 
 def effective_stat(entity, key: str) -> int:
@@ -52,9 +69,14 @@ def effective_stat(entity, key: str) -> int:
 
 
 def default_attack_damage(combatant) -> int:
-    dex = combatant.Stats.get("Dex", 0)
+    """
+    Unarmed attack: best of Str/Dex modifier + ceil(Level × 1.5).
+    The stat modifier may be negative; total damage is at least 1.
+    """
+    dex  = combatant.Stats.get("Dex", 0)
     str_ = combatant.Stats.get("Str", 0)
-    return max(max(dex, str_) - 20, 0) + math.ceil(combatant.Level * 1.5)
+    best_mod = stat_mod(max(dex, str_))
+    return max(1, best_mod + math.ceil(combatant.Level * 1.5))
 
 
 def calculate_damage(combatant, scalars, action) -> int:
@@ -64,7 +86,7 @@ def calculate_damage(combatant, scalars, action) -> int:
     active_scalars = scalars or {}
     scalar_total = sum(
         math.ceil(
-            max(combatant.Stats.get(stat, 0) - 20, 0)
+            stat_mod(combatant.Stats.get(stat, 0))
             * (1 + SCALAR_WEIGHT_LOOKUP.get(weight, 0))
         )
         for stat, weight in active_scalars.items()
@@ -74,9 +96,9 @@ def calculate_damage(combatant, scalars, action) -> int:
 
 def apply_action(combatant, scalars, action, target, settings) -> int:
     from game.objects import NPC, PlayerObject
-    hits = (action or {}).get("Hits", 1)
+    hits        = (action or {}).get("Hits", 1)
     dmg_per_hit = calculate_damage(combatant, scalars, action)
-    total = dmg_per_hit * hits
+    total       = dmg_per_hit * hits
     npc_to_player = (
         isinstance(combatant, NPC)
         and isinstance(target, PlayerObject)
