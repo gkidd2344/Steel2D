@@ -58,6 +58,8 @@ class GameCanvas(tk.Canvas):
         self._valid_targets: Set[Tuple[int, int]] = set()
         self._combat_move_mode: bool = False
         self._combat_valid_moves: Set[Tuple[int, int]] = set()
+        # UUIDs of players currently connected to the server (set by GameScreen)
+        self._connected_uuids: set = set()
 
         self._hover_cell: Optional[Tuple[int, int]] = None
         self._img_cache: Dict[Tuple, object] = {}
@@ -459,17 +461,23 @@ class GameCanvas(tk.Canvas):
                     y0 += offset
                     x1 += offset
                     y1 += offset
-                h_pad = cell_px * 0.175   # 65% fill horizontally
-                # Float from bottom: 4*zoom gap above tile bottom edge
-                # (tile itself has 2*zoom inward padding)
+                h_pad = cell_px * 0.175
                 icon_bottom = y1 - 2 * self.zoom - 4 * self.zoom
                 icon_h = cell_px * 0.65
                 icon_top = icon_bottom - icon_h
+
+                is_connected = pid in self._connected_uuids
+                has_image = is_connected and player.avatar_png is not None and HAS_PIL
+
+                # Border: assigned color when image is shown; black otherwise.
+                # Disconnected players always get the black border regardless.
+                border_color = player.color if has_image else "#000000"
+
                 self.create_rectangle(x0 + h_pad, icon_top, x1 - h_pad, icon_bottom,
                                       fill=player.color,
-                                      outline=_darken(player.color, 0.6),
+                                      outline=border_color,
                                       width=2)
-                if player.avatar_png and HAS_PIL:
+                if has_image:
                     self._draw_avatar(player, x0, icon_top, x1, icon_bottom, cell_px)
                 else:
                     abbrev = (player.Name or "?")[:2].upper()

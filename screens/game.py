@@ -28,7 +28,8 @@ class GameScreen(tk.Frame):
     def __init__(self, parent, state: GameState, client: "GameClient",
                  server: Optional["GameServer"], ui_queue: queue.Queue,
                  local_uuid: str, is_dm: bool,
-                 prefabs: list = None, host_uuid: str = "", **kwargs):
+                 prefabs: list = None, host_uuid: str = "",
+                 connected_uuids: set = None, **kwargs):
         super().__init__(parent, bg=PALETTE["bg"], **kwargs)
         self.state = state
         self.client = client
@@ -40,6 +41,8 @@ class GameScreen(tk.Frame):
         # DM UUID — used by ChatWidget to tag DM messages; correct for both roles
         self._dm_uuid: str = (server.host_uuid if server else
                               host_uuid if host_uuid else local_uuid)
+        # Which player UUIDs are currently connected (drives avatar rendering)
+        self._connected_uuids: set = set(connected_uuids or [])
         # Track whether a blocking interaction panel (Door/Stairs) is open
         self._interaction_panel = None
         self._latencies: dict = {}
@@ -100,6 +103,7 @@ class GameScreen(tk.Frame):
             send_fn=self._send,
             open_context_fn=self._open_context,
         )
+        self._canvas._connected_uuids = self._connected_uuids
         self._canvas.pack(fill=tk.BOTH, expand=True)
 
         self._chat = ChatWidget(
@@ -310,10 +314,18 @@ class GameScreen(tk.Frame):
             self._canvas.center_on_cell(cell[0], cell[1])
         elif event_type == "PLAYER_DISCONNECTED":
             alias = payload.get("alias", "?")
+            uid = payload.get("uuid", "")
+            if uid:
+                self._connected_uuids.discard(uid)
+                self._update_connected_uuids()
             self._chat.add_local(f"{alias} disconnected.", "system")
             self._update_hud()
         elif event_type == "PLAYER_JOINED":
             alias = payload.get("alias", "?")
+            uid = payload.get("uuid", "")
+            if uid:
+                self._connected_uuids.add(uid)
+                self._update_connected_uuids()
             self._chat.add_local(f"{alias} joined.", "system")
             self._update_hud()
         elif event_type == "YOU_WERE_KICKED":
@@ -402,6 +414,10 @@ class GameScreen(tk.Frame):
             return self.local_uuid in (sender, recipient)
         return True
 
+    def _update_connected_uuids(self) -> None:
+        """Propagate the current connected-UUID set to the canvas."""
+        self._canvas._connected_uuids = self._connected_uuids
+
     def _apply_patches(self, patches: list) -> None:
         for patch in patches:
             op = patch.get("op")
@@ -414,7 +430,25 @@ class GameScreen(tk.Frame):
                 x, y = map(int, path.split(","))
                 self.state.grid.pop((x, y), None)
             elif op == "set_player":
-                self.state.players[path] = PlayerObject.from_dict(value)
+                old = self.state.players.get(path)
+                new_p = PlayerObject.from_dict(value)
+                # Invalidate canvas image cache when a player's avatar changes
+                if old and old.avatar_png != new_p.avatar_png:
+                    for k in [k for k in self._canvas._img_cache if k[0] == path]:
+                        del self._canvas._img_cache[k]
+                self.state.players[path] = new_p
+            elif op == "add_connected":
+                uid = patch.get("uuid", "")
+                if uid:
+                    self._connected_uuids.add(uid)
+                    self._update_connected_uuids()
+                continue
+            elif op == "del_connected":
+                uid = patch.get("uuid", "")
+                if uid:
+                    self._connected_uuids.discard(uid)
+                    self._update_connected_uuids()
+                continue
             elif op == "del_player":
                 self.state.players.pop(path, None)
                 for k in list(self.state.players_at.keys()):

@@ -150,11 +150,14 @@ class App(tk.Tk):
             self.show_main_menu()
             return
 
+        connected_uuids = set(welcome.get("connected_uuids", []))
+
         from screens.game import GameScreen
         self._swap_screen(lambda p: GameScreen(
             p, state, client, server, self._ui_queue,
             local_uuid=uid, is_dm=True,
             prefabs=list(self.prefabs),
+            connected_uuids=connected_uuids,
         ))
 
     def _join_flow(self) -> None:
@@ -247,11 +250,14 @@ class App(tk.Tk):
             except Exception:
                 pass   # non-fatal: game still works without local prefab cache
 
+        connected_uuids = set(payload.get("connected_uuids", []))
+
         from screens.game import GameScreen
         self._swap_screen(lambda p: GameScreen(
             p, state, self._client, None, self._ui_queue,
             local_uuid=uid, is_dm=False,
-            host_uuid=host_uuid,   # DM's UUID for correct chat colour-coding
+            host_uuid=host_uuid,
+            connected_uuids=connected_uuids,
         ))
 
     def _join_failed(self, reason: str) -> None:

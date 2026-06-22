@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import base64
 import struct
 import json
 import threading
@@ -250,6 +251,7 @@ class GameServer:
                 "player_id": player_uuid,
                 "game_state": self.state.to_dict(),
                 "your_cell": [0, 0],
+                "connected_uuids": list(self.clients.keys()),
             })
             self.ui_queue.put(("PLAYER_JOINED", {"uuid": player_uuid, "alias": alias}))
             return True
@@ -262,21 +264,36 @@ class GameServer:
                 return False
 
         # ── Regular player ────────────────────────────────────────────────────
+        # Best avatar: character image > profile image
+        char_img_b64: str = (character_data or {}).get("avatar_png") or ""
+        best_avatar_b64: str = char_img_b64 or avatar_b64 or ""
+
         if player_uuid not in self.state.players:
             color = self._assign_color(player_uuid)
             self.state.assigned_colors[player_uuid] = color
             if character_data:
-                # Restore player from their character save
                 player = PlayerObject.from_dict(character_data)
                 player.id = player_uuid
-                player.Name = alias         # session alias always wins
+                player.Name = alias
                 player.color = color
+                # PlayerObject.from_dict already decoded character image into avatar_png.
+                # Fall back to profile image if character has none.
+                if not player.avatar_png and avatar_b64:
+                    try:
+                        player.avatar_png = base64.b64decode(avatar_b64)
+                    except Exception:
+                        pass
             else:
                 hp = calc_max_hp("Medium", 1, 0, self.state.settings.hp_base_multiplier)
                 player = PlayerObject(
                     id=player_uuid, Name=alias, color=color,
                     MaximumHP=hp, CurrentHP=hp,
                 )
+                if avatar_b64:
+                    try:
+                        player.avatar_png = base64.b64decode(avatar_b64)
+                    except Exception:
+                        pass
             self.state.players[player_uuid] = player
             cell = self._find_spawn_cell()
             key = f"{cell[0]},{cell[1]}"
@@ -285,6 +302,13 @@ class GameServer:
                 self.state.players_at[key].append(player_uuid)
             self._player_cells[player_uuid] = cell
         else:
+            # Reconnect — refresh avatar with best available image
+            player = self.state.players[player_uuid]
+            if best_avatar_b64:
+                try:
+                    player.avatar_png = base64.b64decode(best_avatar_b64)
+                except Exception:
+                    pass
             cell = self._find_player_cell(player_uuid)
             if cell is None:
                 cell = self._find_spawn_cell()
@@ -294,19 +318,18 @@ class GameServer:
                     self.state.players_at[key].append(player_uuid)
             self._player_cells[player_uuid] = cell
 
-        if player_uuid not in self.state.avatar_cache and avatar_b64:
-            self.state.avatar_cache[player_uuid] = avatar_b64
-            self.state.players[player_uuid].avatar_png = None
+        if best_avatar_b64:
+            self.state.avatar_cache[player_uuid] = best_avatar_b64
 
         your_cell = list(self._player_cells.get(player_uuid, (0, 0)))
         await conn.send({
-            "type":         "WELCOME",
-            "player_id":    player_uuid,
-            "game_state":   self.state.to_dict(),
-            "your_cell":    your_cell,
-            # Send host's prefab library so the client can persist it locally
-            "host_uuid":    self.host_uuid,
-            "host_prefabs": self._prefabs,
+            "type":            "WELCOME",
+            "player_id":       player_uuid,
+            "game_state":      self.state.to_dict(),
+            "your_cell":       your_cell,
+            "host_uuid":       self.host_uuid,
+            "host_prefabs":    self._prefabs,
+            "connected_uuids": list(self.clients.keys()),
         })
 
         patches = [
@@ -314,6 +337,8 @@ class GameServer:
              "value": self.state.players[player_uuid].to_dict()},
             {"op": "set_players_at", "path": f"{your_cell[0]},{your_cell[1]}",
              "value": self.state.players_at.get(f"{your_cell[0]},{your_cell[1]}", [])},
+            # Let other clients know this player is now connected
+            {"op": "add_connected", "uuid": player_uuid},
         ]
         await self._broadcast_except(player_uuid, {"type": "STATE_PATCH", "patches": patches})
         self.ui_queue.put(("PLAYER_JOINED", {"uuid": player_uuid, "alias": alias}))
