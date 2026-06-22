@@ -1310,19 +1310,7 @@ class GameScreen(tk.Frame):
                 p = self.state.players.get(pid)
                 if not p:
                     continue
-                p_menu = tk.Menu(menu, tearoff=0,
-                                 bg=PALETTE["card"], fg=PALETTE["fg"])
-                p_menu.add_command(label="Level Up",
-                                   command=lambda u=pid: self._send(
-                                       {"type": "DM_LEVEL_UP_PLAYER",
-                                        "player_uuid": u}))
-                p_menu.add_command(label="Modify Player",
-                                   command=lambda u=pid, pl=p:
-                                       self._dm_modify_player(u, pl))
-                p_menu.add_command(label="Options",
-                                   command=lambda u=pid, pl=p:
-                                       self._dm_player_options(u, pl))
-                menu.add_cascade(label=f"Player: {p.Name}", menu=p_menu)
+                self._add_player_menu_section(menu, pid, p)
             menu.tk_popup(sx, sy)
             return
 
@@ -1404,9 +1392,6 @@ class GameScreen(tk.Frame):
                                      {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
 
             if isinstance(obj, NPC) and not is_protected:
-                menu.add_command(
-                    label="Modify Current HP",
-                    command=lambda: self._modify_npc_hp(gx, gy))
                 menu.add_separator()
                 enc_ids = self.state.combat.encounter_npc_ids if self.state.combat else []
                 if obj.id in enc_ids:
@@ -1419,14 +1404,9 @@ class GameScreen(tk.Frame):
                         label="Add To Encounter",
                         command=lambda: self._send(
                             {"type": "DM_ADD_TO_ENCOUNTER", "npc_id": obj.id}))
-                npc_action_menu = tk.Menu(menu, tearoff=0,
-                                          bg=PALETTE["card"], fg=PALETTE["fg"])
-                if obj.Actions:
-                    for aname in obj.Actions:
-                        npc_action_menu.add_command(
-                            label=aname,
-                            command=lambda a=aname: self._dm_npc_target_select(obj, a))
-                menu.add_cascade(label="Actions", menu=npc_action_menu)
+                menu.add_command(
+                    label="Modify Current HP",
+                    command=lambda: self._modify_npc_hp(gx, gy))
                 menu.add_command(label="Speak as NPC…",
                                  command=lambda _o=obj: self._dm_speak_as_npc(_o))
 
@@ -1453,23 +1433,11 @@ class GameScreen(tk.Frame):
             )
 
         if uuids:
-            menu.add_separator()
             for pid in uuids:
                 p = self.state.players.get(pid)
                 if not p:
                     continue
-                p_menu = tk.Menu(menu, tearoff=0,
-                                 bg=PALETTE["card"], fg=PALETTE["fg"])
-                p_menu.add_command(label="Level Up",
-                                   command=lambda u=pid: self._send(
-                                       {"type": "DM_LEVEL_UP_PLAYER", "player_uuid": u}))
-                p_menu.add_command(label="Modify Player",
-                                   command=lambda u=pid, pl=p:
-                                       self._dm_modify_player(u, pl))
-                p_menu.add_command(label="Options",
-                                   command=lambda u=pid, pl=p:
-                                       self._dm_player_options(u, pl))
-                menu.add_cascade(label=f"Player: {p.Name}", menu=p_menu)
+                self._add_player_menu_section(menu, pid, p)
 
         if grid_cell.walkable:
             if not is_protected:
@@ -1478,9 +1446,21 @@ class GameScreen(tk.Frame):
                                  command=lambda: self._send(
                                      {"type": "DM_TILE_SET", "cell": [gx, gy],
                                       "walkable": False}))
-            if grid_cell.occupant is None:
-                menu.add_command(label="Warp Players Here",
-                                 command=lambda: self._dm_warp(gx, gy))
+            # Warp Player Here — only on a fully empty ground tile (no object,
+            # no players). The tile is therefore already a valid destination.
+            if grid_cell.occupant is None and not uuids:
+                players = sorted(self.state.players.values(),
+                                 key=lambda pl: (pl.Name or "").lower())
+                if players:
+                    warp_menu = tk.Menu(menu, tearoff=0,
+                                        bg=PALETTE["card"], fg=PALETTE["fg"])
+                    for p in players:
+                        warp_menu.add_command(
+                            label=p.Name or p.id[:6],
+                            command=lambda u=p.id: self._send(
+                                {"type": "DM_WARP_PLAYER",
+                                 "player_uuid": u, "cell": [gx, gy]}))
+                    menu.add_cascade(label="Warp Player Here", menu=warp_menu)
 
         menu.tk_popup(sx, sy)
 
@@ -1559,6 +1539,80 @@ class GameScreen(tk.Frame):
             side=tk.LEFT, padx=(0, 8), ipadx=6)
         flat_btn(btn_row, "Cancel", panel.close, style="ghost").pack(side=tk.LEFT)
 
+    def _modify_player_hp(self, player_uuid: str, player: PlayerObject) -> None:
+        """In-game panel: DM enters +/- delta to adjust a player's Current HP."""
+        from ui.panel import Panel
+        panel = Panel(self.winfo_toplevel(), padx=28, pady=20)
+
+        tk.Label(panel, text=f"Modify HP — {player.Name}",
+                 bg=PALETTE["card"], fg=PALETTE["fg"],
+                 font=FONTS["heading"]).pack(anchor="w", pady=(0, 6))
+        tk.Label(panel, text=f"Current:  {player.CurrentHP} / {player.MaximumHP}",
+                 bg=PALETTE["card"], fg=PALETTE["fg_dim"],
+                 font=FONTS["body"]).pack(anchor="w", pady=(0, 12))
+
+        entry_row = tk.Frame(panel, bg=PALETTE["card"])
+        entry_row.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(entry_row, text="Amount (+/−)", bg=PALETTE["card"],
+                 fg=PALETTE["fg"], font=FONTS["body"]).pack(side=tk.LEFT, padx=(0, 10))
+        delta_var = tk.StringVar(value="0")
+        delta_entry = tk.Entry(entry_row, textvariable=delta_var,
+                               bg=PALETTE["card2"], fg=PALETTE["fg"],
+                               insertbackground=PALETTE["fg"],
+                               relief=tk.FLAT, font=FONTS["body"], width=8)
+        delta_entry.pack(side=tk.LEFT)
+        delta_entry.focus_set()
+        delta_entry.select_range(0, tk.END)
+
+        err_var = tk.StringVar()
+        tk.Label(panel, textvariable=err_var, bg=PALETTE["card"],
+                 fg=PALETTE["danger"], font=FONTS["small"]).pack(pady=(0, 4))
+
+        btn_row = tk.Frame(panel, bg=PALETTE["card"])
+        btn_row.pack(anchor="e")
+
+        def _confirm():
+            try:
+                delta = int(delta_var.get())
+            except ValueError:
+                err_var.set("Enter a whole number, e.g. −5 or +10")
+                return
+            fresh = self.state.players.get(player_uuid)
+            if not fresh:
+                panel.close()
+                return
+            new_hp = max(0, min(fresh.MaximumHP, fresh.CurrentHP + delta))
+            panel.close()
+            self._send({"type": "DM_MODIFY_PLAYER",
+                        "player_uuid": player_uuid,
+                        "patch": {"CurrentHP": new_hp}})
+
+        delta_entry.bind("<Return>", lambda e: _confirm())
+        flat_btn(btn_row, "Confirm", _confirm, style="normal").pack(
+            side=tk.LEFT, padx=(0, 8), ipadx=6)
+        flat_btn(btn_row, "Cancel", panel.close, style="ghost").pack(side=tk.LEFT)
+
+    def _add_player_menu_section(self, menu: tk.Menu, pid: str,
+                                 player: PlayerObject) -> None:
+        """Append an inline player section (header + options) to a context menu,
+        mirroring the NPC right-click layout. Adds a leading separator only when
+        the menu already has entries."""
+        if menu.index("end") is not None:
+            menu.add_separator()
+        menu.add_command(label=f"Player: {player.Name}", state=tk.DISABLED)
+        menu.add_command(label="Level Up",
+                         command=lambda u=pid: self._send(
+                             {"type": "DM_LEVEL_UP_PLAYER", "player_uuid": u}))
+        menu.add_command(label="Modify Player",
+                         command=lambda u=pid, pl=player:
+                             self._dm_modify_player(u, pl))
+        menu.add_command(label="Modify Current HP",
+                         command=lambda u=pid, pl=player:
+                             self._modify_player_hp(u, pl))
+        menu.add_command(label="Options",
+                         command=lambda u=pid, pl=player:
+                             self._dm_player_options(u, pl))
+
     def _spawn_from_prefabs(self, gx: int, gy: int) -> None:
         """Open the prefab-picker dialog and spawn the selected object."""
         from dialogs.spawn_from_prefabs_dialog import SpawnFromPrefabsDialog
@@ -1633,74 +1687,6 @@ class GameScreen(tk.Frame):
             on_kick=lambda: self._send({"type": "DM_KICK_PLAYER", "player_uuid": player_uuid}),
             on_ban=lambda: self._send({"type": "DM_BAN_PLAYER", "player_uuid": player_uuid}),
         )
-
-    def _dm_npc_target_select(self, npc: NPC, action_name: str) -> None:
-        from game.los import cells_in_range
-        action = (npc.Actions or {}).get(action_name) if action_name != "Default Attack" else None
-        action_range = (action or {}).get("Range", 1)
-        npc_cell = self.state.find_object_cell(npc.id)
-        if not npc_cell:
-            return
-        if action_range <= 1:
-            target_cells = {
-                (npc_cell[0] + dx, npc_cell[1] + dy)
-                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))
-            }
-        else:
-            target_cells = cells_in_range(npc_cell, action_range, self.state,
-                                          self.state.settings.los_max_distance)
-
-        def _on_target(tx, ty):
-            tc = self.state.grid.get((tx, ty))
-            target_obj = tc.occupant if tc else None
-            target_p = next((p for p in self.state.players.values()
-                             if self.state.find_player_cell(p.id) == (tx, ty)), None)
-            tid = ""
-            if isinstance(target_obj, NPC):
-                tid = target_obj.id
-            elif target_p:
-                tid = target_p.id
-            self._send({
-                "type": "DM_NPC_ACTION",
-                "npc_id": npc.id,
-                "action_name": action_name,
-                "target_id": tid,
-                "target_cell": [tx, ty],
-            })
-
-        self._canvas.set_combat_action(
-            {"npc_id": npc.id, "action_name": action_name, "_on_target": _on_target},
-            target_cells,
-        )
-
-    def _dm_warp(self, gx, gy) -> None:
-        from collections import deque
-        visited = {(gx, gy)}
-        q = deque([(gx, gy)])
-        component = []
-        while q:
-            cx, cy = q.popleft()
-            cell = self.state.grid.get((cx, cy))
-            if cell and cell.walkable:
-                component.append((cx, cy))
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                nb = (cx + dx, cy + dy)
-                if nb not in visited:
-                    visited.add(nb)
-                    nc = self.state.grid.get(nb)
-                    if nc and nc.walkable:
-                        q.append(nb)
-
-        connected_players = list(self.state.players.keys())
-        if len(component) < len(connected_players):
-            messagebox.showwarning("Not enough space",
-                                   f"Need at least {len(connected_players)} unoccupied tiles.",
-                                   parent=self.winfo_toplevel())
-            return
-        import random
-        random.shuffle(component)
-        target_cells = [list(c) for c in component[:len(connected_players)]]
-        self._send({"type": "DM_WARP_PLAYERS", "target_cells": target_cells})
 
     # ── ESC menu ──────────────────────────────────────────────────────────────
 

@@ -379,7 +379,7 @@ class GameServer:
             "DM_DELETE_OBJECT": self._h_dm_delete_object,
             "DM_MODIFY_OBJECT": self._h_dm_modify_object,
             "DM_MOVE_OBJECT": self._h_dm_move_object,
-            "DM_WARP_PLAYERS": self._h_dm_warp_players,
+            "DM_WARP_PLAYER": self._h_dm_warp_player,
             "DM_LEVEL_UP_PLAYER": self._h_dm_level_up_player,
             "DM_KICK_PLAYER": self._h_dm_kick_player,
             "DM_BAN_PLAYER": self._h_dm_ban_player,
@@ -1240,35 +1240,34 @@ class GameServer:
         ]
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
-    async def _h_dm_warp_players(self, conn: ClientConn, msg: dict) -> None:
+    async def _h_dm_warp_player(self, conn: ClientConn, msg: dict) -> None:
         if not conn.is_host:
             return
-        target_cells = msg.get("target_cells", [])
-        connected = list(self.clients.keys())
+        pid = msg.get("player_uuid", "")
+        if pid not in self.state.players:
+            return
+        tc = msg.get("cell", [0, 0])
+        tx, ty = int(tc[0]), int(tc[1])
+
         patches = []
-        for i, pid in enumerate(connected):
-            if i >= len(target_cells):
-                break
-            tc = target_cells[i]
-            tx, ty = int(tc[0]), int(tc[1])
-            old_cell = self._player_cells.get(pid)
-            if old_cell:
-                old_key = f"{old_cell[0]},{old_cell[1]}"
-                lst = self.state.players_at.get(old_key, [])
-                if pid in lst:
-                    lst.remove(pid)
-                patches.append({"op": "set_players_at", "path": old_key,
-                                 "value": self.state.players_at.get(old_key, [])})
-            new_key = f"{tx},{ty}"
-            self.state.players_at.setdefault(new_key, [])
-            if pid not in self.state.players_at[new_key]:
-                self.state.players_at[new_key].append(pid)
-            self._player_cells[pid] = (tx, ty)
-            patches.append({"op": "set_players_at", "path": new_key,
-                             "value": self.state.players_at[new_key]})
-            pc = self.clients.get(pid)
-            if pc:
-                await pc.send({"type": "CAMERA_CENTER", "cell": [tx, ty]})
+        old_cell = self._player_cells.get(pid) or self.state.find_player_cell(pid)
+        if old_cell:
+            old_key = f"{old_cell[0]},{old_cell[1]}"
+            lst = self.state.players_at.get(old_key, [])
+            if pid in lst:
+                lst.remove(pid)
+            patches.append({"op": "set_players_at", "path": old_key,
+                             "value": self.state.players_at.get(old_key, [])})
+
+        new_key = f"{tx},{ty}"
+        self.state.players_at.setdefault(new_key, [])
+        if pid not in self.state.players_at[new_key]:
+            self.state.players_at[new_key].append(pid)
+        self._player_cells[pid] = (tx, ty)
+        patches.append({"op": "set_players_at", "path": new_key,
+                         "value": self.state.players_at[new_key]})
+        # No CAMERA_CENTER: a connected player's camera already tracks them every
+        # frame, and disconnected players have no client to centre.
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
     async def _h_dm_level_up_player(self, conn: ClientConn, msg: dict) -> None:
