@@ -3,7 +3,7 @@ import uuid as _uuid
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Optional, Tuple, TYPE_CHECKING
-from app.constants import PALETTE, FONTS, EQUIPMENT_SLOTS
+from app.constants import PALETTE, FONTS, EQUIPMENT_SLOTS, THROWABLE_SLOT
 from app.config import STAT_KEYS, HEALTH_SIZE_LOOKUP, SCALAR_WEIGHT_LOOKUP
 from game.stats import calc_max_hp, max_individual, max_total
 from ui.panel import Panel
@@ -336,6 +336,7 @@ class SpawnObjectDialog(Panel):
         self._item_quantity = tk.IntVar(value=1)
         self._item_value = tk.IntVar(value=0)
         self._item_slot = tk.StringVar(value="(none)")
+        self._item_thrown_damage = tk.IntVar(value=0)
 
         # ── General ──────────────────────────────────────────────────────────
         _, gen = self._make_section(self._body_frame, "General", expanded=True)
@@ -369,9 +370,19 @@ class SpawnObjectDialog(Panel):
 
         def _slot_row(p):
             slot_opts = ["(none)"] + [f"{k}: {v}" for k, v in EQUIPMENT_SLOTS.items()]
-            ttk.Combobox(p, textvariable=self._item_slot,
-                         values=slot_opts, state="readonly", width=16).pack(side=tk.LEFT)
+            cb = ttk.Combobox(p, textvariable=self._item_slot,
+                              values=slot_opts, state="readonly", width=16)
+            cb.pack(side=tk.LEFT)
+            cb.bind("<<ComboboxSelected>>", lambda e: self._on_slot_changed())
         self._field_row(gen, "Equipment Slot", _slot_row)
+
+        # ThrownDamage — shown only when slot = Throwable
+        self._thrown_damage_row = tk.Frame(gen, bg=PALETTE["card"])
+        self._lbl(self._thrown_damage_row, "Thrown Damage",
+                  anchor="e").pack(side=tk.LEFT, padx=(4, 4))
+        self._spinbox(self._thrown_damage_row, self._item_thrown_damage,
+                      0, 9999, w=8).pack(side=tk.LEFT)
+        # Hidden by default; shown when slot switches to Throwable
 
         # ── Stat Modifiers ────────────────────────────────────────────────────
         _, sm_sec = self._make_section(self._body_frame, "Stat Modifiers",
@@ -396,6 +407,20 @@ class SpawnObjectDialog(Panel):
         self._action_frame = tk.Frame(act_sec, bg=PALETTE["card"])
         self._action_frame.pack(fill=tk.X)
         self._build_action_buttons(act_sec)
+
+    def _on_slot_changed(self) -> None:
+        slot_str = self._item_slot.get()
+        is_throwable = False
+        if slot_str and slot_str != "(none)":
+            try:
+                slot_id = int(slot_str.split(":")[0])
+                is_throwable = (slot_id == THROWABLE_SLOT)
+            except Exception:
+                pass
+        if is_throwable:
+            self._thrown_damage_row.pack(fill=tk.X, pady=2)
+        else:
+            self._thrown_damage_row.pack_forget()
 
     def _validate_item_stats(self) -> None:
         if not hasattr(self, "_item_stat_warn") or not self._item_stat_warn:
@@ -689,6 +714,8 @@ class SpawnObjectDialog(Panel):
             if obj.EquipmentSlot:
                 slot_name = EQUIPMENT_SLOTS.get(obj.EquipmentSlot, "")
                 self._item_slot.set(f"{obj.EquipmentSlot}: {slot_name}")
+                self._on_slot_changed()   # show ThrownDamage row if Throwable
+            self._item_thrown_damage.set(getattr(obj, "ThrownDamage", 0))
             if obj.Stats:
                 for k, v in obj.Stats.items():
                     if k in self._item_stat_vars:
@@ -801,6 +828,7 @@ class SpawnObjectDialog(Panel):
                 "Scalars":      None,   # Scalars removed from Items
                 "Actions":      self._collect_actions(),
                 "EquipmentSlot": slot,
+                "ThrownDamage": self._item_thrown_damage.get() if slot == THROWABLE_SLOT else 0,
             }
 
     def _do_spawn(self) -> None:

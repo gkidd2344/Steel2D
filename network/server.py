@@ -10,6 +10,9 @@ import time
 import random
 import colorsys
 import socket
+import sys
+import subprocess
+import ipaddress
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +36,60 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _detect_subnet_suffix(ip: str) -> str:
+    """Best-effort subnet mask for the interface that holds `ip`.
+
+    Windows → dotted mask (e.g. "255.255.255.0"); Unix → prefix length
+    (e.g. "24"). Returns "" when it cannot be determined.
+
+    The detection matches by the IP's dotted-quad value (and, on Windows, the
+    mask's dotted-quad on the line that immediately follows the IPv4 Address
+    line), so it does not depend on any localised label text.
+    """
+    import re
+    try:
+        if sys.platform.startswith("win"):
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.run(
+                ["ipconfig"], capture_output=True, text=True,
+                timeout=4, creationflags=flags,
+            ).stdout
+            lines = out.splitlines()
+            ip_re = re.compile(rf"(?<![\d.]){re.escape(ip)}(?![\d.])")
+            quad_re = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
+            for i, line in enumerate(lines):
+                if ip_re.search(line):
+                    # In ipconfig the Subnet Mask line directly follows the
+                    # IPv4 Address line; grab the next dotted-quad.
+                    for nxt in lines[i + 1:i + 4]:
+                        m = quad_re.search(nxt)
+                        if m:
+                            return m.group(1)
+        else:
+            out = subprocess.run(
+                ["ip", "-o", "-f", "inet", "addr", "show"],
+                capture_output=True, text=True, timeout=4,
+            ).stdout
+            m = re.search(rf"inet {re.escape(ip)}/(\d+)", out)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _host_lan_network(ip: str):
+    """ipaddress network for `ip`'s subnet. Falls back to /24 when the exact
+    mask cannot be detected (the overwhelmingly common home/office case)."""
+    suffix = _detect_subnet_suffix(ip) or "24"
+    for sfx in (suffix, "24"):
+        try:
+            return ipaddress.ip_network(f"{ip}/{sfx}", strict=False)
+        except ValueError:
+            continue
+    return None
 
 
 class ClientConn:
@@ -74,13 +131,23 @@ class ClientConn:
 class GameServer:
     def __init__(self, state: GameState, ui_queue: queue.Queue, port: int,
                  host_uuid: str, password: str = "",
-                 prefabs: list = None):
+                 prefabs: list = None, display_ip: str = "",
+                 lan_only: bool = False):
         self.state = state
         self.ui_queue = ui_queue
         self.port = port
         self.host_uuid = host_uuid
         self.password  = password
         self._prefabs  = list(prefabs) if prefabs else []
+        # IP shown to the DM (HUD / connection string). Chosen in the host
+        # dialog: LAN IP for local play, public IP when network play is on.
+        # Empty → fall back to the locally-sourced LAN IP.
+        self._display_ip = display_ip
+        # LAN-only enforcement: when network play is OFF, reject any inbound
+        # connection whose source IP is not loopback or in the host's own
+        # subnet (computed once at construction).
+        self._lan_only = lan_only
+        self._lan_network = _host_lan_network(get_local_ip()) if lan_only else None
         self._water_ticks: Dict[str, int] = {}   # pid -> consecutive ticks on water
         self.clients: Dict[str, ClientConn] = {}
         self._thread: Optional[threading.Thread] = None
@@ -90,7 +157,26 @@ class GameServer:
 
     @property
     def local_ip(self) -> str:
-        return get_local_ip()
+        return self._display_ip or get_local_ip()
+
+    def _peer_allowed(self, peer_ip: str) -> bool:
+        """True if a connecting peer may proceed under LAN-only mode.
+
+        Loopback (the DM's own client + same-machine players) is always
+        allowed; otherwise the source must fall inside the host's subnet.
+        """
+        try:
+            addr = ipaddress.ip_address(peer_ip)
+        except ValueError:
+            return False
+        if addr.is_loopback:
+            return True
+        if self._lan_network is None:
+            return False   # subnet unknown → fail closed (loopback only)
+        try:
+            return addr in self._lan_network
+        except TypeError:
+            return False   # IPv4/IPv6 version mismatch
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -207,6 +293,16 @@ class GameServer:
                 pass
 
     async def _handle_client(self, reader, writer) -> None:
+        # LAN-only gate — drop non-local sources before any protocol exchange.
+        if self._lan_only:
+            peer = writer.get_extra_info("peername")
+            peer_ip = peer[0] if peer else ""
+            if not self._peer_allowed(peer_ip):
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
         conn = ClientConn(reader, writer)
         try:
             msg = await asyncio.wait_for(conn.recv_msg(), timeout=15.0)
@@ -372,6 +468,7 @@ class GameServer:
             "ITEM_EQUIP": self._h_item_equip,
             "STATS_UPDATE": self._h_stats_update,
             "PLAYER_END_TURN": self._h_player_end_turn,
+            "PLAYER_ACTIONS_UPDATE": self._h_player_actions_update,
             "DISCONNECT": self._h_disconnect,
             "PING": self._h_ping,
             "DM_TILE_SET": self._h_dm_tile_set,
@@ -537,11 +634,24 @@ class GameServer:
 
         _UNARMED = {"Range": 1, "BaseDamage": 1, "Hits": 2,
                     "ScalesWith": {"Str": "A", "Dex": "B"}}
+        from app.constants import THROWABLE_SLOT
         scalars = None
         action = None
+        _is_throw = False
+        _throw_item = None
         if action_name == "Unarmed Attack":
             action = _UNARMED
             scalars = _UNARMED["ScalesWith"]
+        elif item_id and action_name.startswith("Throw "):
+            # Throw action from Throwable slot — identified by sentinel in adef
+            throw_item = player.Equipment.get(THROWABLE_SLOT)
+            if throw_item and throw_item.id == item_id:
+                thrown_dmg = getattr(throw_item, "ThrownDamage", 0)
+                action = {"Range": 7, "BaseDamage": thrown_dmg, "Hits": 1,
+                          "ScalesWith": {"Str": "B", "Dex": "S"}}
+                scalars = action["ScalesWith"]
+                _is_throw = True
+                _throw_item = throw_item
         elif item_id:
             item = next((i for i in player.Equipment.values() if i.id == item_id), None)
             if item and item.Actions:
@@ -570,6 +680,14 @@ class GameServer:
                 attacker=player, target=target, total=total,
                 action=action, cell=(tx, ty),
                 attacker_name=player.Name, action_name=action_name or "Attack")
+
+        # ── Throwable: decrement quantity; delete at 0 ────────────────────────
+        if _is_throw and _throw_item is not None:
+            _throw_item.Quantity -= 1
+            if _throw_item.Quantity <= 0:
+                player.Equipment.pop(THROWABLE_SLOT, None)
+            patches_throw = [{"op": "set_player", "path": pid, "value": player.to_dict()}]
+            await self._broadcast({"type": "STATE_PATCH", "patches": patches_throw})
 
         auto_end = False
         if self.state.combat and self.state.combat.active:
@@ -1031,6 +1149,16 @@ class GameServer:
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
     # ── combat end-turn ───────────────────────────────────────────────────────
+
+    async def _h_player_actions_update(self, conn: ClientConn, msg: dict) -> None:
+        pid = conn.uuid
+        player = self.state.players.get(pid)
+        if not player:
+            return
+        actions = msg.get("actions")
+        player.Actions = actions if isinstance(actions, dict) and actions else None
+        patches = [{"op": "set_player", "path": pid, "value": player.to_dict()}]
+        await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
     async def _h_player_end_turn(self, conn: ClientConn, msg: dict) -> None:
         pid = conn.uuid
@@ -1655,6 +1783,11 @@ class GameServer:
                         if casts:
                             casts["remaining"] = casts.get("max_per_rest", 0)
                             changed = True
+            for action in list(player.Actions.values()):
+                casts = action.get("Casts")
+                if casts:
+                    casts["remaining"] = casts.get("max_per_rest", 0)
+                    changed = True
             if changed:
                 patches.append({"op": "set_player", "path": pid,
                                  "value": player.to_dict()})

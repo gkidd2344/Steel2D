@@ -17,11 +17,11 @@ HEALTH_SIZE_LOOKUP: dict = {
 }
 
 SCALAR_WEIGHT_LOOKUP: dict = {
-    "S": 1.00,
-    "A": 0.70,
-    "B": 0.45,
-    "C": 0.15,
-    "F": 0.05,
+    "S": 1.00, 
+    "A": 0.55, 
+    "B": 0.25, 
+    "C": 0.15, 
+    "F": 0.05
 }
 
 _GAME_CONFIG_DEFAULTS = {
@@ -50,6 +50,40 @@ def get_prefabs_dir() -> Path:
     d = get_base_dir() / "prefabs"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def list_prefab_files() -> list:
+    """Return metadata for every prefab JSON file, sorted by filename.
+
+    Each entry: {"path": Path, "filename": str, "count": int}.
+    `count` is the number of objects in the file (0 if unreadable).
+    """
+    result = []
+    prefabs_dir = get_prefabs_dir()
+    for path in sorted(prefabs_dir.glob("*.json"), key=lambda p: p.name.lower()):
+        count = 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            count = len(data.get("objects", []))
+        except Exception:
+            count = 0
+        result.append({"path": path, "filename": path.name, "count": count})
+    return result
+
+
+def load_prefabs_from_files(paths: list) -> list:
+    """Load and flatten prefab objects from the given list of file paths."""
+    objects: list = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for obj in data.get("objects", []):
+                objects.append(dict(obj))
+        except Exception:
+            pass
+    return objects
 
 
 def merge_host_prefabs(host_uuid: str, new_objects: list) -> None:

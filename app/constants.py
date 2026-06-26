@@ -61,7 +61,10 @@ EQUIPMENT_SLOTS = {
     6: "Trinket",
     7: "Main Hand",
     8: "Off Hand",
+    9: "Throwable",
 }
+
+THROWABLE_SLOT = 9
 
 RESERVED_HUES = [0.0, 0.167, 0.333, 0.083, 0.05]
 HUE_EXCLUSION_RADIUS = 0.08

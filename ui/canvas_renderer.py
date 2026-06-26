@@ -606,10 +606,11 @@ class GameCanvas(tk.Canvas):
                             lines.append(obj.Description)
             elif isinstance(obj, Item):
                 if can_see:
-                    lines.append(f"Item: {obj.Name}")
+                    lines.append(f"{obj.Name}")
                     if self.is_dm:
                         if obj.Description:
                             lines.append(obj.Description)
+                        lines.append(f"") # Blank line for tooltip formatting
                         lines.append(f"Qty: {obj.Quantity}  Val: {obj.Value}g")
                     else:
                         if obj.Description:
@@ -642,18 +643,29 @@ class GameCanvas(tk.Canvas):
 
         mx = self.winfo_pointerx() - self.winfo_rootx()
         my = self.winfo_pointery() - self.winfo_rooty()
-        font_h = 14
         pad = 6
-        tw = max(len(l) for l in lines) * 7 + pad * 2
-        th = len(lines) * font_h + pad * 2
-        tx = min(mx + 15, self.winfo_width() - tw - 5)
-        ty = min(my + 15, self.winfo_height() - th - 5)
-        self.create_rectangle(tx, ty, tx + tw, ty + th,
-                              fill="#111111", outline=PALETTE["border"])
-        for i, line in enumerate(lines):
-            self.create_text(tx + pad, ty + pad + i * font_h,
-                             text=line, fill=PALETTE["fg"],
-                             font=("Segoe UI", 8), anchor="nw")
+        # Clamp the tooltip to at most five grid cells wide; long lines wrap.
+        wrap_w = max(1, int(5 * cell_px) - pad * 2)
+        text = "\n".join(lines)
+
+        # Draw the text first (with wrapping) so its rendered extent can be
+        # measured, then place the background rectangle behind it.
+        text_item = self.create_text(
+            0, 0, text=text, fill=PALETTE["fg"],
+            font=("Segoe UI", 8), anchor="nw", width=wrap_w)
+        bbox = self.bbox(text_item)
+        if not bbox:
+            return
+        bx0, by0, bx1, by1 = bbox
+        tw = (bx1 - bx0) + pad * 2
+        th = (by1 - by0) + pad * 2
+
+        tx = max(0, min(mx + 15, self.winfo_width() - tw - 5))
+        ty = max(0, min(my + 15, self.winfo_height() - th - 5))
+        self.coords(text_item, tx + pad, ty + pad)
+        rect = self.create_rectangle(tx, ty, tx + tw, ty + th,
+                                     fill="#111111", outline=PALETTE["border"])
+        self.tag_lower(rect, text_item)
 
     # ── input handlers ────────────────────────────────────────────────────────
 

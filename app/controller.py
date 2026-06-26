@@ -1,4 +1,3 @@
-import json
 import queue
 import threading
 import time
@@ -7,7 +6,7 @@ from tkinter import messagebox
 from typing import Optional, List
 
 from app.constants import PALETTE, FONTS
-from app.config import load_user_config, save_user_config, get_base_dir, get_prefabs_dir
+from app.config import load_user_config, save_user_config
 
 
 class App(tk.Tk):
@@ -22,6 +21,7 @@ class App(tk.Tk):
         self._ui_queue: Optional[queue.Queue] = None
         self._client = None
         self._server = None
+        self._host_dialog = None        # HostDialog kept open behind New/Load submenus
         self.prefabs: List[dict] = []   # loaded prefab objects (DM-hosted games only)
         self.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.bind("<<GoMainMenu>>", lambda e: self.show_main_menu())
@@ -30,6 +30,7 @@ class App(tk.Tk):
     # ── screens ───────────────────────────────────────────────────────────────
 
     def show_main_menu(self) -> None:
+        self._close_host_dialog()
         self._cleanup_session()
         self._swap_screen(lambda p: self._make_main_menu(p))
 
@@ -86,13 +87,25 @@ class App(tk.Tk):
 
     def _host_flow(self) -> None:
         from dialogs.host_dialog import HostDialog
-        HostDialog(
+        # Kept open behind the New/Load submenus so cancelling a submenu returns
+        # here with all fields intact. Closed for real in _do_launch_dm_game.
+        self._host_dialog = HostDialog(
             self,
             on_new_game=self._new_game_flow,
             on_load_game=self._load_game_flow,
         )
 
-    def _new_game_flow(self, password: str = "") -> None:
+    def _close_host_dialog(self) -> None:
+        dlg = self._host_dialog
+        self._host_dialog = None
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:
+                pass
+
+    def _new_game_flow(self, password: str = "", port: int = 5000,
+                       display_ip: str = "", network_play: bool = False) -> None:
         from app.config import load_game_config
         from game.state import GameSettings, make_initial_state
         cfg = load_game_config()
@@ -102,23 +115,47 @@ class App(tk.Tk):
             los_max_distance=int(cfg.get("los_max_distance", 20)),
         )
         state = make_initial_state("Untitled", settings)
-        self._launch_dm_game(state, password=password)
+        self._launch_dm_game(state, password=password, port=port,
+                             display_ip=display_ip, network_play=network_play)
 
-    def _load_game_flow(self, password: str = "") -> None:
+    def _load_game_flow(self, password: str = "", port: int = 5000,
+                        display_ip: str = "", network_play: bool = False) -> None:
         from dialogs.load_game_dialog import LoadGameDialog
-        LoadGameDialog(self, on_load=lambda state: self._launch_dm_game(state, password=password))
+        LoadGameDialog(self, on_load=lambda state: self._launch_dm_game(
+            state, password=password, port=port, display_ip=display_ip,
+            network_play=network_play))
 
-    def _launch_dm_game(self, state, password: str = "") -> None:
-        self._load_all_prefabs()       # populate self.prefabs before game starts
+    def _launch_dm_game(self, state, password: str = "", port: int = 5000,
+                        display_ip: str = "", network_play: bool = False) -> None:
+        # Let the host pick which prefab files to load before the game starts.
+        from app.config import list_prefab_files
+        files = list_prefab_files()
+        if not files:
+            self.prefabs = []
+            self._do_launch_dm_game(state, password, port, display_ip, network_play)
+            return
 
+        from dialogs.prefab_select_dialog import PrefabSelectDialog
+
+        def _on_confirm(selected_paths: list) -> None:
+            from app.config import load_prefabs_from_files
+            self.prefabs = load_prefabs_from_files(selected_paths)
+            self._do_launch_dm_game(state, password, port, display_ip, network_play)
+
+        PrefabSelectDialog(self, files, on_confirm=_on_confirm)
+
+    def _do_launch_dm_game(self, state, password: str = "", port: int = 5000,
+                          display_ip: str = "", network_play: bool = False) -> None:
+        # Committed to launching — the Host dialog is no longer needed.
+        self._close_host_dialog()
         self._ui_queue = queue.Queue()
         uid = self._user_config["uuid"]
         alias = self._user_config.get("alias", "DM")
-        port = self._user_config.get("preferred_port", 5000)
 
         from network.server import GameServer
         server = GameServer(state, self._ui_queue, port, host_uuid=uid,
-                            password=password, prefabs=list(self.prefabs))
+                            password=password, prefabs=list(self.prefabs),
+                            display_ip=display_ip, lan_only=not network_play)
         server.start()
         self._server = server
 
@@ -263,21 +300,6 @@ class App(tk.Tk):
     def _join_failed(self, reason: str) -> None:
         messagebox.showerror("Error", reason)
         self.show_main_menu()
-
-    # ── prefab loading ────────────────────────────────────────────────────────
-
-    def _load_all_prefabs(self) -> None:
-        """Load all prefab JSON files from the prefabs directory into self.prefabs."""
-        self.prefabs = []
-        prefabs_dir = get_prefabs_dir()
-        for path in sorted(prefabs_dir.glob("*.json")):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                for obj in data.get("objects", []):
-                    self.prefabs.append(dict(obj))
-            except Exception:
-                pass
 
     # ── utilities ─────────────────────────────────────────────────────────────
 

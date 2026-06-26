@@ -1,7 +1,7 @@
 # Steel2D — Full Technical Requirements
 **Target audience:** Claude Code (automated implementation)  
-**Version:** v0.15  
-**Supersedes:** v0.14
+**Version:** v0.19  
+**Supersedes:** v0.18
 
 ---
 
@@ -93,6 +93,9 @@ All packages declared in `requirements.txt`.
 │   ├── new_game_settings.py       # NewGameSettingsDialog
 │   ├── load_game_dialog.py        # LoadGameDialog
 │   ├── spawn_object_dialog.py     # SpawnObjectDialog (NPC/Item) & ModifyObjectDialog
+│   ├── spawn_from_prefabs_dialog.py # SpawnFromPrefabsDialog (right-click Spawn Object; paginated)
+│   ├── prefab_select_dialog.py    # PrefabSelectDialog (host-time prefab pack picker)
+│   ├── actions_dialog.py          # ActionsDialog (player K-key / DM Modify Actions)
 │   ├── door_dialog.py             # DoorInteractionDialog (PC side)
 │   ├── inventory_dialog.py        # InventoryDialog
 │   ├── player_list_overlay.py     # PlayerListOverlay (TAB/O key)
@@ -101,7 +104,7 @@ All packages declared in `requirements.txt`.
 │   ├── dm_options_dialog.py       # DmOptionsDialog (kick/ban)
 │   ├── combat_overlay.py          # TurnOrderPanel (right side during combat)
 │   ├── prefab_load_dialog.py      # PrefabLoadDialog (DM Workshop)
-│   ├── spawn_prefab_dialog.py     # SpawnPrefabDialog (in-game Spawn Prefab)
+│   ├── spawn_prefab_dialog.py     # SpawnPrefabDialog (paginated; action/buff picker)
 │   └── stair_dialog.py            # StairModifyDialog + StairPromptDialog
 │
 ├── game/
@@ -143,7 +146,7 @@ STAT_KEYS = ("Str", "Dex", "Con", "Int", "Wis", "Cha")
 
 HEALTH_SIZE_LOOKUP = {"Small": 1, "Medium": 2, "Large": 3, "Giant": 6, "Colossal": 10}
 
-SCALAR_WEIGHT_LOOKUP = {"S": 1.00, "A": 0.70, "B": 0.45, "C": 0.15, "F": 0.05}
+SCALAR_WEIGHT_LOOKUP = {"S": 1.00, "A": 0.55, "B": 0.25, "C": 0.15, "F": 0.05}
 ```
 
 ```python
@@ -199,8 +202,12 @@ class Item:
     Stats:         Optional[Dict[str, int]] = None    # equipment stat bonuses
     Scalars:       None                               # removed in v0.15
     Actions:       Optional[Dict[str, dict]] = None
-    EquipmentSlot: Optional[int] = None               # 1-8; see §17.1
+    EquipmentSlot: Optional[int] = None               # 1-9; see §17.1
+    ThrownDamage:  int = 0      # base damage of the Throw action; only meaningful
+                                # when EquipmentSlot == 9 (Throwable). See §17.5
 ```
+
+The **Thrown Damage** field is only shown in the create/modify form when **Equipment Slot = Throwable** (id 9); it is hidden for every other slot.
 
 Items no longer have a user-editable Level field and no longer support item-level Scalars. Per-action ScalesWith is still available via action rows.
 
@@ -313,7 +320,10 @@ class PlayerObject:
     Inventory:   List[Item]     = field(default_factory=list)
     avatar_png:  Optional[bytes] = None
     Buffs:       List[dict]     = field(default_factory=list)
+    Actions:     Optional[Dict[str, dict]] = None   # player-level actions (§15.6)
 ```
+
+`Actions` are actions assigned **directly to the player object** (not inherited from items). They are managed via the **K-key Actions dialog** (player) or **Modify Actions** (DM right-click) and persisted with `PLAYER_ACTIONS_UPDATE` / `DM_MODIFY_PLAYER`.
 
 #### Equipment Slot IDs
 
@@ -321,7 +331,9 @@ class PlayerObject:
 EQUIPMENT_SLOTS = {
     1: "Head", 2: "Chest", 3: "Legs", 4: "Feet",
     5: "Ring", 6: "Trinket", 7: "Main Hand", 8: "Off Hand",
+    9: "Throwable",
 }
+THROWABLE_SLOT = 9
 ```
 
 #### Player HP Rules
@@ -390,9 +402,10 @@ class GameSettings:
 ### 4.13 CombatTurn
 
 ```python
-MOVE_COST      = 1.5
-ACTION_COST    = 2.0
-TURN_THRESHOLD = 3.0
+MOVE_COST         = 1.0   # points per movement
+ACTION_COST       = 1.0   # points per action
+TURN_THRESHOLD    = 1.0   # auto-end when points_spent >= this
+COMBAT_MOVE_RANGE = 5     # max tiles a combatant may travel per Move action
 
 @dataclass
 class CombatTurn:
@@ -408,6 +421,8 @@ class CombatTurn:
     @property
     def can_act(self)  -> bool: return not self.has_acted and self.points_spent < TURN_THRESHOLD
 ```
+
+**One action per turn (v0.17).** Each turn carries a **single 1.0-point budget**; a Move *or* an action consumes it and immediately ends the turn. The cost constants are deliberately kept separate from the threshold so a future multi-action rework only needs to raise `TURN_THRESHOLD` without touching the rest of the logic.
 
 ---
 
@@ -511,13 +526,15 @@ Avatar: if `avatar_cache[uuid]` exists server-side, HELLO's `avatar_b64` is igno
 
 ```python
 # op values
-"set_cell"       # path: "x,y", value: Cell dict
-"del_cell"       # path: "x,y"
-"set_player"     # path: uuid, value: PlayerObject dict
-"del_player"     # path: uuid
-"set_players_at" # path: "x,y", value: [uuid, ...]
-"set_settings"   # value: GameSettings dict
-"set_combat"     # value: CombatState dict or null
+"set_cell"        # path: "x,y", value: Cell dict
+"del_cell"        # path: "x,y"
+"set_player"      # path: uuid, value: PlayerObject dict
+"del_player"      # path: uuid
+"set_players_at"  # path: "x,y", value: [uuid, ...]
+"add_connected"   # uuid: a player just connected (drives avatar rendering, §10.3a)
+"del_connected"   # uuid: a player disconnected
+"set_settings"    # value: GameSettings dict
+"set_combat"      # value: CombatState dict or null
 ```
 
 ### 6.6 Message Catalogue (abridged)
@@ -525,17 +542,34 @@ Avatar: if `avatar_cache[uuid]` exists server-side, HELLO's `avatar_b64` is igno
 All messages carry `"type": str`.
 
 **Client -> Server (all players):**
-`HELLO`, `PLAYER_MOVE`, `PLAYER_ACTION`, `CHAT_SEND`, `DOOR_INTERACT`, `ITEM_PICKUP`, `ITEM_DROP`, `ITEM_DISCARD`, `ITEM_USE`, `ITEM_EQUIP`, `STATS_UPDATE`, `PLAYER_END_TURN`, `PLAYER_TAKE_STAIRS`, `DISCONNECT`, `PING`
+`HELLO`, `PLAYER_MOVE`, `PLAYER_ACTION`, `PLAYER_ACTIONS_UPDATE`, `CHAT_SEND`, `DOOR_INTERACT`, `ITEM_PICKUP`, `ITEM_DROP`, `ITEM_DISCARD`, `ITEM_USE`, `ITEM_EQUIP`, `STATS_UPDATE`, `PLAYER_END_TURN`, `PLAYER_TAKE_STAIRS`, `DISCONNECT`, `PING`
+
+- `PLAYER_ACTIONS_UPDATE{actions}` — the player replaces their own player-level `Actions` (§15.6).
 
 **Server -> Client (broadcasts):**
 `WELCOME`, `REJECT`, `STATE_PATCH`, `CHAT_RECV`, `CAMERA_CENTER`, `PLAYER_DISCONNECTED`, `YOU_WERE_KICKED`, `PONG`, `COMBAT_STARTED`, `COMBAT_ENDED`, `COMBAT_TURN_ADVANCED`, `COMBAT_RESOURCES_USED`
 
+- `WELCOME` additionally carries `connected_uuids` (the set of currently-connected players) so each client knows who to render with an avatar (§10.3a).
+
 **Host DM -> Server (DM-only; server validates `is_host`):**
-`DM_TILE_SET`, `DM_SPAWN_OBJECT`, `DM_DELETE_OBJECT`, `DM_MODIFY_OBJECT`, `DM_MOVE_OBJECT`, `DM_WARP_PLAYERS`, `DM_LEVEL_UP_PLAYER`, `DM_KICK_PLAYER`, `DM_BAN_PLAYER`, `DM_MODIFY_PLAYER`, `DM_UPDATE_SETTINGS`, `DM_ADD_TO_ENCOUNTER`, `DM_REMOVE_FROM_ENCOUNTER`, `DM_START_COMBAT`, `DM_END_COMBAT`, `DM_NPC_MOVE`, `DM_NPC_ACTION`, `DM_NPC_END_TURN`, `DM_CHAT_AS_NPC`, `DM_LONG_REST`
+`DM_TILE_SET`, `DM_SPAWN_OBJECT`, `DM_DELETE_OBJECT`, `DM_MODIFY_OBJECT`, `DM_MOVE_OBJECT`, `DM_WARP_PLAYER`, `DM_LEVEL_UP_PLAYER`, `DM_KICK_PLAYER`, `DM_BAN_PLAYER`, `DM_MODIFY_PLAYER`, `DM_UPDATE_SETTINGS`, `DM_ADD_TO_ENCOUNTER`, `DM_REMOVE_FROM_ENCOUNTER`, `DM_START_COMBAT`, `DM_END_COMBAT`, `DM_NPC_MOVE`, `DM_NPC_ACTION`, `DM_NPC_END_TURN`, `DM_CHAT_AS_NPC`, `DM_LONG_REST`
+
+- `DM_WARP_PLAYER{player_uuid, cell}` — warps **one** chosen player (connected or not) to an empty ground tile. Replaces the old multi-player `DM_WARP_PLAYERS`; no camera snap and no space-validity check (the menu only offers it on a fully empty tile). `DM_MODIFY_PLAYER`'s `patch` may now carry `CurrentHP` (Modify Current HP) or `Actions` (Modify Actions).
 
 ### 6.7 Player Color Assignment
 
 HSV `(h, 0.85, 1.0)` — always full brightness and high saturation. Hue must maintain Chebyshev distance >= 0.10 from reserved hues (NPC red, NPC green, Item orange, DM orange, yell salmon, whisper blue/purple, etc.). Fallback: hash of UUID.
+
+### 6.8 LAN-Only Enforcement (`lan_only`)
+
+The server always **binds to `0.0.0.0`** (all interfaces). Access control is done at the application layer, gated by the host dialog's **Enable Network Play** checkbox (`lan_only = not network_play`):
+
+- When **network play is off**, `_handle_client` inspects the connecting peer's source IP (`writer.get_extra_info("peername")`) **before any protocol exchange** and drops anything that is not **loopback** or inside the **host's own subnet**.
+- The host subnet is computed once at construction by detecting the **exact netmask** for the interface holding the LAN IP — on Windows by parsing `ipconfig` (matched by dotted-quad, locale-independent, console window suppressed via `CREATE_NO_WINDOW`); on Unix by reading the `/prefix` from `ip addr`. It falls back to **/24** if detection fails, so LAN play still works.
+- Membership uses `ipaddress`: the peer must equal loopback or be `in` the host's `IPv4Network`. This is **strict same-subnet** — a different private subnet (e.g. `192.168.x` when the host is on `10.0.0.0/24`) is rejected, not just public addresses. Loopback is always allowed so the DM's own local client and same-machine players connect.
+- **Note:** the OS still completes the TCP handshake before the app closes a rejected socket, so an external scan sees the port as "open" — it just cannot get past the gate. True invisibility is an OS-firewall concern (e.g. a "Local subnet"-scoped rule), complementary to this check.
+
+When **network play is on**, the gate is bypassed entirely and any source may connect (internet play, subject to the usual router port-forwarding).
 
 ---
 
@@ -547,7 +581,7 @@ HSV `(h, 0.85, 1.0)` — always full brightness and high saturation. Hue must ma
 [⚙]  (gear icon, top-right; opens BanlistDialog)
 
    STEEL2D
-   v0.15 · multiplayer tabletop lobby
+   v0.19 · multiplayer tabletop lobby
    ─────────────────────────────────────────
    [avatar 40x40]  Signed in as  <alias>
    ─────────────────────────────────────────
@@ -563,6 +597,35 @@ HSV `(h, 0.85, 1.0)` — always full brightness and high saturation. Hue must ma
 
 - **DM Workshop**: available to any player; opens `DmToolScreen`.
 - **Host / Join**: disabled until alias is configured.
+
+### 7.1a Host Dialog (`HostDialog`)
+
+Layout (top-to-bottom): **IP : Port** row → **Enable Network Play** checkbox → **Session Password** (optional) → `─── HR ───` → **New Game** / **Load Game** / **Cancel**.
+
+- **IP : Port** is always visible. The IP is a **read-only** field (selectable/copyable); the port is **editable**, default **5000**, validated to `1–65535` (falls back to 5000 otherwise). The label sits on the line above, matching the password field.
+- **Enable Network Play** controls *both* the displayed IP and the connection policy:
+  - **Unchecked (local)** → the field shows the **LAN IP** (route-to-`8.8.8.8` trick). The server enforces **LAN-only** (§6.8).
+  - **Checked (network)** → the field shows the **external/public IP**, fetched in a background thread from `api.ipify.org` / `checkip.amazonaws.com` / `ipinfo.io` / `ifconfig.me` (shows `Fetching…`, cached, LAN fallback on failure). The server accepts **any** source.
+- The chosen IP is passed through to the server as its **display IP** — the in-game DM HUD's `🔌 IP:port` element (§9.1) shows exactly this value rather than re-deriving the LAN IP.
+- New/Load callbacks carry `(password, port, display_ip, network_play)`. (The DM picks prefab packs next — §8.4.)
+
+### 7.1b Join Dialog (`JoinDialog`)
+
+Two fields: a single **Host Address** connection-string field and a **Password**. The merged field lets the player paste exactly what the DM copied from their HUD (§9.1), or a friendly host address.
+
+- The label carries a **ⓘ hint icon**; hovering shows: *"Accepts an IP, IP:Port, or a host address (like a website). If only an IP or plain address is supplied it connects over port 80; an https:// address uses 443. Add :PORT (e.g. 10.0.0.5:5000) to use a specific port."*
+- **`_parse_address(raw)` → `(host, port)`** accepts:
+
+  | Input form | Result |
+  |---|---|
+  | `IP:port` / `host:port` | that host + port (explicit port always wins) |
+  | `IP` / `host` | that host + port **80** (`IMPLICIT_PORT`) |
+  | `http://host[:port]` | host + port 80 (or the explicit `:port`) |
+  | `https://host[:port]` | host + port **443** (`IMPLICIT_HTTPS_PORT`, or the explicit `:port`) |
+
+  The scheme is matched case-insensitively and any trailing path/query/fragment after the host is ignored. Port is validated to `1–65535`; an empty host or non-numeric port shows an inline error.
+- Prefilled as `host:port` (defaults `127.0.0.1:<DEFAULT_PORT>`); on a wrong-password re-open it preserves the last-attempted `host:port` and shows the error.
+- On success calls `on_join(host, port, password)`.
 
 ### 7.2 Profile Screen
 
@@ -646,16 +709,32 @@ Names must be unique **within the same object type** (NPC/Item/Action/Buff). Doo
 
 ### 8.3 In-Game Spawn Object Using Prefabs
 
-DM right-clicks unoccupied non-protected ground -> **Spawn Object...** (only shown when `GameScreen.prefabs` is non-empty).
+DM right-clicks unoccupied non-protected ground -> **Spawn Object** (`SpawnFromPrefabsDialog`).
 
-Opens `SpawnPrefabDialog` — NPC and Item types only, on individual tabs (Action/Buff cannot be placed on the grid):
-1. **Table view**: Name / Type / Description; clickable rows; search bar at top filters on Name and Description text for substring matches.
-2. **Detail view** (on row click): read-only field list; Spawn / <- Back.
-3. Spawn: fresh UUID assigned; placed via DM_SPAWN_OBJECT; panel closes.
+- Tabbed **NPC / Item** tables sourced from the session prefab list (Action/Buff cannot be placed on the grid).
+- Live **search bar** filters each tab on Name and Description (substring).
+- **`Lv` dropdown filter** (next to the search): its values are the distinct `Level`s present in the *current tab's* prefabs, **sorted ascending** (e.g. `All, 1, 3, 10`), plus an `All` option. Selecting a level restricts results to objects with that exact `Level`. The dropdown is repopulated and reset to `All` on each tab switch; objects with a missing/invalid `Level` are treated as level 1.
+- Rows are **sorted alphabetically by Name** (case-insensitive).
+- **Pagination**: at most **25 rows per page**. A pagination bar (`‹ Prev` / `Page n / m (N items)` / `Next ›`) sits below the list. Editing the search or level filter resets to page 1 and the page count reflects the filtered result. This caps per-open widget creation so large prefab libraries render instantly.
+- **Mousewheel scrolls the table from anywhere in the dialog** (the handler is bound recursively to the dialog and re-bound to each rebuilt row), not just when hovering the scrollbar.
+- Clicking a row spawns an instance (fresh UUID) via DM_SPAWN_OBJECT and closes the panel.
 
-### 8.3 Session Prefabs
+The legacy `SpawnPrefabDialog` (used by the in-form "+Add Prefab Action" picker, the DM Workshop Buff picker, and the "Spawn Prefab…" item) is likewise **sorted alphabetically by Name** and **paginated at 25 rows per page**.
 
-- All prefab files in `<game_dir>/prefabs/` loaded at host-game-start into `GameScreen.prefabs`.
+### 8.4 Host-Time Prefab Pack Selection
+
+When the DM starts hosting (either **New Game** or after a save is chosen in **Load Game**), a `PrefabSelectDialog` is shown **before the server starts**:
+
+- Lists every `*.json` file in `<game_dir>/prefabs/` in a two-column table: **Prefab File** (filename) and **Records** (object count), sorted by filename.
+- Each row carries a **checkbox** (all ticked by default). Clicking anywhere on a row toggles it. **Select All / Select None** buttons are provided.
+- **Start Game** loads only the objects from the ticked files into `GameScreen.prefabs` / the server's prefab library; unticked files are ignored for this session. **Cancel** aborts hosting and returns to the main menu.
+- If there are **no** prefab files at all, the dialog is skipped and the game launches with an empty prefab list.
+
+File metadata is gathered by `app.config.list_prefab_files()` (`{path, filename, count}` per file); the selected files are flattened by `app.config.load_prefabs_from_files(paths)`.
+
+### 8.5 Session Prefabs
+
+- Only the prefab files **selected at host time** (§8.4) are loaded into `GameScreen.prefabs`.
 - Every NPC or Item the DM creates in-game via Spawn Object is also appended to `self.prefabs` immediately (without saving to disk), making it reusable via Spawn Prefab for the rest of the session.
 
 ---
@@ -665,7 +744,7 @@ Opens `SpawnPrefabDialog` — NPC and Item types only, on individual tabs (Actio
 ### 9.1 Layout
 
 ```
-[DM HUD: IP:port | N players online]  (DM only, thin bar at top)
+[🔌 IP:port        N player(s) online        Paintbrush Size: N]   (DM only, 28px top bar)
 ─────────────────────────────────────────────────────────────────
                        GameCanvas
                   (tk.Canvas, fills rest)
@@ -674,6 +753,11 @@ Opens `SpawnPrefabDialog` — NPC and Item types only, on individual tabs (Actio
 [⚔ Start Combat        0 in encounter]  (DM only, full-width, above chat)
 [Chat log  380x180px]                   (bottom-left, over canvas)
 ```
+
+**DM HUD (28px top bar)** has three elements:
+- **`🔌 IP:port`** — left-aligned, **left-click-to-copy**: clicking copies the `IP:port` string to the clipboard (cursor shows a hand). On copy, a small **"Copied to clipboard!"** bubble floats in for **2 seconds**, positioned just below the top bar (≈ 4px under the 28px bar, left offset ≈ the label's padding from the window's left edge). Re-clicking restarts the 2-second timer.
+- **`N player(s) online`** — **centred** on the bar (`relx=0.5`), excludes the DM from the count.
+- **`Paintbrush Size: N`** — right-aligned (see §11.3).
 
 Chat entry: dark when unfocused; white background with black text when focused. Scrollbar inside chat log (dark 6px, overlaid).
 
@@ -744,7 +828,19 @@ All icons **float from the bottom** of the tile: `icon_bottom = y1 - 2*zoom - 4*
 | Wall | `#888888` fill. Extends to shared boundary with each orthogonal adjacent wall, eliminating the inter-cell gap. |
 | Stairs (Up) | `#3388bb` rect (4px pad all sides) + centred `▲` white bold text. |
 | Stairs (Down) | `#883388` rect (4px pad) + centred `▼` white bold. |
-| Player | Colored rect (65% cell fill; 17.5% pad each side). Outline: fill color x0.6 darker, 2px. Avatar PNG if available (scaled to 75% cell). Abbreviation otherwise. |
+| Player | Colored rect (65% cell fill; 17.5% pad each side). Rendering depends on connection state — see §10.3a. |
+
+### 10.3a Player Avatar & Connection State
+
+The canvas tracks which players are **currently connected** (`_connected_uuids`, fed by `WELCOME.connected_uuids` plus `add_connected` / `del_connected` STATE_PATCH ops and the join/leave events). The player sprite renders by state:
+
+| State | Render |
+|---|---|
+| Joined, **not connected** | Colored square (assigned color), **black** 2px border, initials |
+| Connected, **no image** | Colored square, **black** border, initials |
+| Connected, **with image** | Avatar image (scaled to 75% cell) over the square, border = **player's assigned color** |
+
+**Avatar source (server-side, at HELLO / reconnect):** the player's **character image** is used if present, otherwise their **profile image**, otherwise none (colored square). The chosen image is decoded into `PlayerObject.avatar_png` and broadcast via `set_player`; clients invalidate their image cache when the bytes change.
 
 ### 10.4 HP Bars (DM only)
 
@@ -770,6 +866,8 @@ Tooltip only appears when cell has an occupant or players. Coordinates always sh
 | Door (in LOS) | State, Locked, Broken | State, Locked, Broken |
 | Stairs (in LOS) | Name, Direction, linked cell coords | "Stairs Up" / "Stairs Down" |
 | Empty cell | (nothing) | (nothing) |
+
+**Sizing:** the tooltip is **clamped to at most five grid cells wide** (`5 × cell_px`, zoom-scaled). Lines longer than that (e.g. a long Description) **word-wrap**; the box height grows to fit as many wrapped lines as needed. The background rectangle is sized from the measured text extent and drawn behind the text, and the whole tooltip is clamped to stay within the canvas bounds.
 
 ### 10.7 Text Bubbles
 
@@ -837,7 +935,7 @@ The renderer uses tkinter's Canvas widget with individual draw calls (rectangle 
 - ~50 filled cells: mild frame-rate drop noticeable.
 - ~200+ filled cells: camera panning becomes jittery; tile spawn/delete operations slow noticeably.
 
-This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.15.
+This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.19.
 
 **Workaround:** middle-mouse drag (with a large brush size) over large regions deletes tiles quickly, reducing the cell count and restoring performance. The performance issue is **content-count-driven** (not content-type-driven — ground tiles without any shading cause the same drop as water tiles).
 
@@ -879,19 +977,19 @@ Per action row (shared by NPC/Item Spawn dialog and Action prefab editor):
 
 ### 12.4 DM Right-Click Context Menu (out of combat)
 
-**On unoccupied non-protected ground:**
-- **Spawn Object** — opens `SpawnFromPrefabsDialog` (tabbed NPC/Item table with search bar); places the selected prefab as a new instance
+**On a fully empty ground tile (no object and no player):**
+- **Spawn Object** — opens `SpawnFromPrefabsDialog` (tabbed NPC/Item table with search bar; sorted alphabetically; paginated 25/page); places the selected prefab as a new instance
 - Spawn Door (default: closed, unlocked, intact)
 - Spawn Stairs (default: Up, no link)
 - Spawn Prefab... (shown only when `GameScreen.prefabs` is non-empty; opens full prefab picker)
-- Warp Players Here (if >= 16 contiguous tiles in the connected component)
+- **Warp Player Here** — a **cascade** listing every player object in the game (connected or not, alphabetical). Selecting one warps that single player to this tile (`DM_WARP_PLAYER`). No camera snap, no space check — the menu only appears on an already-valid empty tile.
 
 **On NPC:**
 - Modify Object, Delete Object
-- **Modify Current HP** — in-app panel: enter signed integer delta; positive = heal (clamped to MaxHP), negative = damage; `<= 0` triggers full death path (DM_DELETE_OBJECT)
-- **Speak as NPC…** — opens a right-side Panel with a textarea; submitting sends `DM_CHAT_AS_NPC` so the NPC speaks in chat under its own name. Replaces the old `/as` command.
 - Add To Encounter / Remove From Encounter
-- Actions -> submenu (with combat-aware Casts display)
+- **Modify Current HP** — in-app panel: signed integer delta; positive = heal (clamped to MaxHP), negative = damage; `<= 0` triggers full death path (DM_DELETE_OBJECT)
+- **Speak as NPC…** — right-side Panel with a textarea; submitting sends `DM_CHAT_AS_NPC` so the NPC speaks in chat under its own name. Replaces the old `/as` command.
+- *(The old "Actions" cascade on NPC right-click was removed.)*
 
 **On Door:**
 - Open/Close toggle, Break/Fix toggle, Lock/Unlock toggle
@@ -904,11 +1002,15 @@ Per action row (shared by NPC/Item Spawn dialog and Action prefab editor):
 **On Wall:**
 - Delete Wall
 
-**On protected cells:** player sub-menus only; no spawn/delete options.
+**On a player (inline section, not a cascade — mirrors the NPC layout):** a disabled `Player: <Name>` header followed by:
+- **Level Up**, **Modify Player** (stats), **Modify Current HP**, **Modify Actions** (opens the same Actions dialog as the player's K-key; sends `DM_MODIFY_PLAYER{patch:{Actions}}`), **Options** (kick / ban).
+- Multiple players on one cell each get their own section.
+
+**On protected cells:** player sections only; no spawn/delete options.
 
 **During active combat:**
-- Left and middle click: all tile/object editing blocked (only NPC click-to-move allowed).
-- Right click: player sub-menus only (Level Up, Modify Player, Options).
+- Left and middle click: all tile/object editing blocked (only combatant click-to-move / targeting allowed).
+- Right click: player sections only (Level Up, Modify Player, Modify Current HP, Modify Actions, Options).
 
 ---
 
@@ -927,31 +1029,39 @@ When DM clicks **Start Combat**:
 
 ### 13.2 Points System
 
-Each turn has a 3.0-point budget:
+Each turn has a **1.0-point budget**. A Move costs 1.0 and an action costs 1.0, so exactly one of them is allowed per turn:
 
 | Resource | Cost | Blocked when |
 |---|---|---|
-| Move (1 tile) | 1.5 pts | `points_spent >= 3.0` (auto-ends turn) |
-| Action (attack/ability) | 2.0 pts | `has_acted == True` or `points_spent >= 3.0` |
-| Second action | Invalid | `has_acted == True` always blocks |
+| Move (up to 5 tiles) | 1.0 pt | `points_spent >= 1.0` (auto-ends turn) |
+| Action (attack/ability) | 1.0 pt | `has_acted == True` or `points_spent >= 1.0` |
 
-Valid combos: Move+Move (3.0 -> auto-end), Move+Action (3.5 -> auto-end), Action+Move (3.5 -> auto-end). Two actions per turn is invalid.
+Either choice consumes the budget and **auto-ends the turn** immediately — no manual "End Turn" required. (The constants are kept separate from the threshold so a future multi-action turn only needs a larger `TURN_THRESHOLD`.)
 
-Auto-end fires immediately after the triggering move/action — no manual "End Turn" required.
+### 13.2a Combat Action Panel (over the chat, current combatant only)
+
+When it is the local player's turn (or an NPC's turn for the DM), a panel appears above the chat with the active combatant's name and three modes:
+
+- **Normal**: `🦶 Move`, `⚔ Do Action`, and `Pass Turn` buttons (Move/Action greyed when their budget is spent).
+- **Move select**: valid destination cells are highlighted (see §13.3); a full-width **Cancel Move** button returns to Normal.
+- **Action select**: a 4-column table — **Action | Rng | Damage | Buffs**. Each row shows the computed total damage; the Buffs column reads `Applies: <BuffName>` and a **hover tooltip** shows the buff's Type/Value/Stat/Duration. A full-width **Cancel** returns to Normal.
+- **Action target**: after choosing an action, valid target cells are highlighted; **Cancel Action** returns to Normal.
+
+Every player and NPC always has a hardcoded **"Unarmed Attack"** (Range 1, BaseDamage 1, Hits 2, scales **A** with Str and **B** with Dex). Equipped-item actions appear as `<ItemName> : <ActionName>`.
 
 ### 13.3 Player Combat Turn
 
-- **Move**: WASD or left-click adjacent walkable ground. Deducts MOVE_COST; auto-ends if total >= 3.0.
-- **Action**: left-click adjacent NPC -> Action context menu. Range > 1: highlights valid cells; click to confirm. Empty cells are valid (result = fizzle).
-- **Range 0 actions**: self-target (no NPC target required).
-- **End Turn**: SPACE or "End Turn" button in Turn Order Panel.
+- **Move (up to 5 tiles)**: click `🦶 Move` → the server pre-computes every cell reachable within **`COMBAT_MOVE_RANGE` (5)** orthogonal steps using the same walkability rules as real-time movement (NPC/Wall/closed Door block; Item/Stairs are passable). Those cells are highlighted; clicking any one moves there (`PLAYER_MOVE`, BFS-validated server-side) and ends the turn. WASD is disabled during combat.
+- **Action**: click `⚔ Do Action` → pick a row → Range 1 highlights the 4 orthogonal cells, Range > 1 highlights all in-range LOS cells; click a target. Empty cells are valid (result = "It doesn't do anything…").
+- **Range 0 actions**: self-target (no target cell required).
+- **Throwable**: if an item is equipped in the **Throwable** slot (id 9), a synthetic **"Throw <ItemName>"** action is offered (Range 7, Hits 1, base = the item's `ThrownDamage`, scales **B** Str / **S** Dex). On use it decrements the item's `Quantity`; at 0 the item is removed from equipment. See §17.5.
+- **End Turn**: SPACE or "Pass Turn" / "End Turn" button in the panel.
 
 ### 13.4 DM NPC Turn
 
 - WASD pans camera normally.
-- Left-click adjacent walkable non-protected ground -> move active NPC (`DM_NPC_MOVE`).
-- Right-click NPC -> Actions submenu -> target selection.
-- SPACE or "End NPC Turn" in Turn Order Panel -> `DM_NPC_END_TURN`.
+- On the NPC's turn, the same Combat Action Panel drives **Move** (highlighted reachable cells, ≤ 5 tiles, `DM_NPC_MOVE`) and **Do Action** (target highlights, `DM_NPC_ACTION`).
+- SPACE or "End NPC Turn" -> `DM_NPC_END_TURN`.
 
 ### 13.5 Stat Modifier Formula
 
@@ -1140,6 +1250,7 @@ Via WASD / arrow keys (also triggers `PLAYER_MOVE`; panning is not available to 
 | TAB or O | Toggle Player List overlay |
 | B | Toggle Inventory |
 | C | Toggle Stats view |
+| K | Toggle Actions dialog |
 | ENTER | Focus chat input |
 | SPACE | End turn early (forfeit remaining points) |
 | ESC (chat focused) | Blur chat, do not send |
@@ -1147,7 +1258,7 @@ Via WASD / arrow keys (also triggers `PLAYER_MOVE`; panning is not available to 
 | TAB (chat focused, after /) | Autocomplete |
 | [ / ] (DM only) | Decrease / increase paintbrush size |
 
-All keys suppressed when any `tk.Entry` or `tk.Text` has keyboard focus. ESC, TAB/O, B, C all **toggle** — pressing again closes the panel.
+All keys suppressed when any `tk.Entry` or `tk.Text` has keyboard focus. ESC, TAB/O, B, C, K all **toggle** — pressing again closes the panel.
 
 ### 15.4 Stats View (C key)
 
@@ -1156,6 +1267,16 @@ Shows: alias, Level, HP, Size, all stats with equipment bonuses and buff modifie
 ### 15.5 Player List (TAB/O key)
 
 Overlay panel: color swatch, avatar, name, latency (ms) or "HOST".
+
+### 15.6 Player-Level Actions (K key — `ActionsDialog`)
+
+A floating panel (like Inventory) listing actions assigned **directly to the player object** (`PlayerObject.Actions`), not inherited from items.
+
+- **Searchable** table (Name + Description) with columns **Name | Description | Casts Remaining** (the casts column is blank when the action has no Casts).
+- Each row has an **[✕]** at the far right that removes the action from the player.
+- **Clicking a row** opens a read-only detail panel showing all action metadata (Range, Base Damage, Hits, Casts, Scales With, Applies Buffs). Buff entries are **hover-tooltipped** with Type/Value/Stat/Duration.
+- An **Add Action** button at the bottom opens a searchable, alphabetically-sorted table of all loaded **Action prefabs**; clicking a row adds it to the player (with an overwrite confirm if the name already exists).
+- Every change is pushed immediately via `PLAYER_ACTIONS_UPDATE` (player) or `DM_MODIFY_PLAYER{patch:{Actions}}` (DM via §16.4 **Modify Actions**).
 
 ---
 
@@ -1172,14 +1293,16 @@ See §11.2.
 - **Modify**: right-click occupant -> Modify Object.
 - **Delete**: right-click -> Delete [type].
 
-### 16.3 Warp Players
+### 16.3 Warp Player
 
-Right-click walkable cell in a connected component of >= 16 tiles -> "Warp Players Here". Server BFS assigns one unique cell per connected player; sends CAMERA_CENTER to each.
+Right-click a **fully empty ground tile** -> **Warp Player Here** cascade -> pick any player object (connected or not). The chosen player is moved to that tile via `DM_WARP_PLAYER`. No camera centering is sent (a connected PC's camera already tracks them every frame; a disconnected player has no client), and there is no space-validity check because the menu only appears on an already-empty tile.
 
-### 16.4 Player Management (right-click player sprite)
+### 16.4 Player Management (right-click player sprite — inline section)
 
 - **Level Up**: Level += 1, MaxHP recalculated, full heal.
 - **Modify Player**: edit Stats via dialog, patch via DM_MODIFY_PLAYER.
+- **Modify Current HP**: signed-delta panel; `patch:{CurrentHP}` clamped to `[0, MaxHP]` (players are never deleted at 0, unlike NPCs).
+- **Modify Actions**: opens the player-level Actions dialog (§15.6); `patch:{Actions}`.
 - **Options**: Disconnect (1-min temp ban) or Ban (permanent).
 
 ### 16.5 Encounter & Combat
@@ -1209,19 +1332,21 @@ DM right-click any NPC → **Speak as NPC…** opens a right-side Panel with a m
 ### 17.1 Equipment Slots
 
 ```
-1: Head    2: Chest    3: Legs    4: Feet
-5: Ring    6: Trinket  7: Main Hand  8: Off Hand
+1: Head    2: Chest      3: Legs       4: Feet
+5: Ring    6: Trinket    7: Main Hand  8: Off Hand
+9: Throwable
 ```
 
-One item per slot. Equipping to occupied slot swaps old item to Inventory.
+One item per slot. Equipping to an occupied slot swaps the old item back to Inventory.
 
 ### 17.2 Inventory Dialog (B key)
 
-5-column 64x64px grid. Right-click item -> Use (Consumable) / Equip / Drop / Discard.
-- **Use**: removes from Inventory; text bubble above player.
-- **Equip**: moves to Equipment slot (item must have EquipmentSlot defined).
-- **Drop**: BFS finds nearest empty unoccupied ground; places as world object.
-- **Discard**: confirm -> permanently removed.
+- **Equipment grid**: one cell per slot (slot 9 Throwable included). Left-click an equipped item → **Inspect** tooltip; right-click → Inspect / Unequip → Backpack.
+- **Backpack list**: each row shows a small icon, the full item name, and **inline action buttons next to the item** — **Inspect**, **Use** (Consumable) or **Equip**, and **Drop**. Left-clicking the icon/name also opens Inspect; right-click opens the full menu (adds **Discard**).
+  - **Use**: removes from Inventory; text bubble above player.
+  - **Equip**: moves to its Equipment slot (item must have `EquipmentSlot` defined).
+  - **Drop**: BFS finds nearest empty unoccupied ground; places as a world object.
+  - **Discard**: confirm → permanently removed.
 
 ### 17.3 Effective Stats Calculation
 
@@ -1236,7 +1361,15 @@ Shown as `"STR   8   (+2 equip) = 10"`.
 
 ### 17.4 Actions in Combat
 
-Available attack actions = "Attack (default)" + all `Actions` from all equipped items. Actions with Casts show `[N/M]` remaining; greyed out at 0.
+Available actions = hardcoded **"Unarmed Attack"** + all item-level `Actions` from every equipped item (labelled `<ItemName> : <ActionName>`) + the synthetic **Throw** action when a Throwable is equipped + player-level `Actions` (§15.6). Actions with Casts show `[N/M]` remaining and grey out at 0.
+
+### 17.5 Throwable Slot (id 9)
+
+An item assigned to slot **9 (Throwable)** carries a `ThrownDamage` integer. While it is equipped, the player's combat action list gains a synthetic **"Throw <ItemName>"** action:
+
+- Range **7**, **1** hit, BaseDamage = `ThrownDamage`, scales **B** with Str and **S** with Dex.
+- On use the server (`_h_player_action`) decrements the item's `Quantity` by 1 and broadcasts the updated player. When `Quantity` reaches **0**, the item is removed from the Throwable slot.
+- The throw is identified server-side by the action name prefix `"Throw "` plus the item occupying `THROWABLE_SLOT`; it is not stored in the item's `Actions`.
 
 ---
 
@@ -1364,7 +1497,15 @@ msgpack + zlib (level 9). Tuple grid keys as `"x,y"` strings. Avatar PNG as base
 
 ### 20.4 Load Game Dialog
 
-Lists saves sorted newest-first. Format: `"<GameName>   |   <alias1>, <alias2>"`. Select -> Start or Delete (with confirmation). DM viewport restored to saved `host_view` / `host_zoom`.
+A scrollable **3-column table** (clickable rows with hover highlight + selection), sorted newest-first:
+
+| Column | Source |
+|---|---|
+| **Game Name** | filename stem with any trailing `_YYYYMMDD_HHMMSS` stripped |
+| **Date / Time** | parsed from the filename timestamp, else the file's mtime |
+| **Players** | aliases read from the save (`first 4`, then `+N`) |
+
+Single-click selects; double-click loads. **Start** loads the selected save, **Delete** removes it (with confirmation). DM viewport is restored to the saved `host_view` / `host_zoom`.
 
 ### 20.5 Combat Save / Load
 
@@ -1465,4 +1606,4 @@ All runtime data goes to `%APPDATA%\Steel2D\` (frozen) or project root (dev):
 
 ---
 
-*End of Requirements Document v0.15*
+*End of Requirements Document v0.19*

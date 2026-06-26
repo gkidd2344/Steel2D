@@ -98,6 +98,7 @@ class Item:
     Scalars: Optional[Dict[str, str]] = None
     Actions: Optional[Dict[str, dict]] = None
     EquipmentSlot: Optional[int] = None
+    ThrownDamage: int = 0   # only meaningful when EquipmentSlot == THROWABLE_SLOT (9)
 
     def to_dict(self) -> dict:
         return {
@@ -113,6 +114,7 @@ class Item:
             "Scalars": self.Scalars,
             "Actions": self.Actions,
             "EquipmentSlot": self.EquipmentSlot,
+            "ThrownDamage": self.ThrownDamage,
         }
 
     @classmethod
@@ -130,6 +132,7 @@ class Item:
             Scalars=d.get("Scalars"),
             Actions=d.get("Actions"),
             EquipmentSlot=d.get("EquipmentSlot"),
+            ThrownDamage=int(d.get("ThrownDamage", 0)),
         )
 
 
@@ -181,6 +184,8 @@ class PlayerObject:
     # Buffs: list of {Name, Type, Value, Duration, ?Stat}
     # Types: "HP Over Time" | "Stat Modifier" | "Turn Modifier" | "Defense Modifier"
     Buffs: List[dict] = field(default_factory=list)
+    # Player-level actions (same schema as NPC.Actions / Item.Actions)
+    Actions: Optional[Dict[str, dict]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -200,6 +205,7 @@ class PlayerObject:
             "Inventory": [item.to_dict() for item in self.Inventory],
             "avatar_png": base64.b64encode(self.avatar_png).decode() if self.avatar_png else None,
             "Buffs": self.Buffs,
+            "Actions": self.Actions,
         }
 
     @classmethod
@@ -225,6 +231,7 @@ class PlayerObject:
             Inventory=inventory,
             avatar_png=avatar_png,
             Buffs=_migrate_buffs(d.get("Buffs", [])),
+            Actions=d.get("Actions") or None,
         )
 
 

@@ -58,6 +58,8 @@ class GameScreen(tk.Frame):
         self._tab_panel = None
         self._b_panel = None
         self._c_panel = None
+        self._k_panel = None
+        self._copy_bubble = None   # "Copied to clipboard!" flash bubble
 
         # Smooth-pan state (DM only)
         self._pan_keys: set = set()
@@ -82,13 +84,23 @@ class GameScreen(tk.Frame):
             self._hud.pack_propagate(False)
             ip = self.server.local_ip
             port = self.server.port
+            # IP:Port — left-click copies it to the clipboard
             self._conn_lbl = tk.Label(
                 self._hud,
-                text=f"🔌 {ip}:{port}   0 players online",
+                text=f"🔌 {ip}:{port}",
                 bg=PALETTE["card2"], fg=PALETTE["fg"],
-                font=FONTS["small"], padx=10,
+                font=FONTS["small"], padx=10, cursor="hand2",
             )
             self._conn_lbl.pack(side=tk.LEFT, pady=2)
+            self._conn_lbl.bind("<Button-1>", lambda e: self._copy_conn_string())
+            # Player count — centred on the bar
+            self._players_lbl = tk.Label(
+                self._hud,
+                text="0 player(s) online",
+                bg=PALETTE["card2"], fg=PALETTE["fg"],
+                font=FONTS["small"],
+            )
+            self._players_lbl.place(relx=0.5, rely=0.5, anchor="center")
             # Paintbrush size indicator (right side of HUD)
             self._brush_lbl = tk.Label(
                 self._hud,
@@ -162,6 +174,7 @@ class GameScreen(tk.Frame):
         root.bind("<Tab>",        self._on_tab)
         root.bind("<KeyPress-b>", self._on_b)
         root.bind("<KeyPress-c>", self._on_c)
+        root.bind("<KeyPress-k>", self._on_k)
         root.bind("<Return>",     self._on_enter)
         root.bind("<space>",      self._on_space)
         # Tile-type painting keys (DM only; canvas reads the flags)
@@ -609,6 +622,25 @@ class GameScreen(tk.Frame):
             multiplier=self.state.settings.hp_base_multiplier,
         )
 
+    def _on_k(self, event) -> None:
+        if self._is_chat_focused():
+            return
+        if self._k_panel and not self._k_panel._closing:
+            self._k_panel.close()
+            self._k_panel = None
+            return
+        player = self.state.players.get(self.local_uuid)
+        if not player:
+            return
+        from dialogs.actions_dialog import ActionsDialog
+        self._k_panel = ActionsDialog(
+            self.winfo_toplevel(), player, self.prefabs,
+            on_actions_change=lambda actions: self._send({
+                "type": "PLAYER_ACTIONS_UPDATE",
+                "actions": actions,
+            }),
+        )
+
     def _on_enter(self, event) -> None:
         self._chat.focus_input()
 
@@ -838,7 +870,7 @@ class GameScreen(tk.Frame):
         if mode == "normal":
             PANEL_H = 88
         elif mode in ("move_select", "action_target"):
-            PANEL_H = 58
+            PANEL_H = 76   # title (28) + helptext (22) + cancel button (26)
         else:  # action_select: title + col-hdr + N rows + cancel
             PANEL_H = max(110, 28 + 20 + len(actions) * 32 + 34)
 
@@ -886,9 +918,9 @@ class GameScreen(tk.Frame):
         elif mode == "move_select":
             tk.Label(panel, text="Click a highlighted cell to move",
                      bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
-                     font=FONTS["small"]).pack(padx=8, pady=6, anchor="w")
-            flat_btn(panel, "Cancel", self._combat_cancel, style="muted").pack(
-                fill=tk.X, padx=4, pady=3, ipady=2)
+                     font=FONTS["small"]).pack(padx=8, pady=(4, 2), anchor="w")
+            flat_btn(panel, "↩  Cancel Move", self._combat_cancel,
+                     style="muted").pack(fill=tk.X, padx=4, pady=(2, 4), ipady=3)
 
         elif mode == "action_select":
             # Column header
@@ -914,11 +946,11 @@ class GameScreen(tk.Frame):
 
         elif mode == "action_target":
             aname = self._combat_pending_action.get("action_name", "Action")
-            tk.Label(panel, text=f"Click a target for:  {aname}",
+            tk.Label(panel, text=f"Click a target:  {aname}",
                      bg=PALETTE["card2"], fg=PALETTE["fg_dim"],
-                     font=FONTS["small"]).pack(padx=8, pady=6, anchor="w")
-            flat_btn(panel, "Cancel", self._combat_cancel, style="muted").pack(
-                fill=tk.X, padx=4, pady=3, ipady=2)
+                     font=FONTS["small"]).pack(padx=8, pady=(4, 2), anchor="w")
+            flat_btn(panel, "↩  Cancel Action", self._combat_cancel,
+                     style="muted").pack(fill=tk.X, padx=4, pady=(2, 4), ipady=3)
 
     def _get_combat_actions_for_ct(self, ct) -> list:
         """Return [(name, scalars, action_def, item_id, disabled), ...] for combatant."""
@@ -929,14 +961,29 @@ class GameScreen(tk.Frame):
         if ct.combatant_type == "player":
             player = self.state.players.get(ct.id)
             if player:
-                for slot_item in player.Equipment.values():
+                from app.constants import THROWABLE_SLOT
+                for slot_id, slot_item in player.Equipment.items():
+                    # Throwable item — synthesise a "Throw" action
+                    if slot_id == THROWABLE_SLOT:
+                        thrown_dmg = getattr(slot_item, "ThrownDamage", 0)
+                        throw_adef = {
+                            "Range": 7, "BaseDamage": thrown_dmg, "Hits": 1,
+                            "ScalesWith": {"Str": "B", "Dex": "S"},
+                            "_throw_item_id": slot_item.id,  # sentinel for server
+                        }
+                        disabled = slot_item.Quantity <= 0
+                        result.append(
+                            (f"Throw {slot_item.Name}", {"Str": "B", "Dex": "S"},
+                             throw_adef, slot_item.id, disabled))
+                    # Regular item actions
                     if not slot_item.Actions:
                         continue
                     for aname, adef in slot_item.Actions.items():
                         casts = (adef or {}).get("Casts")
                         disabled = (casts is not None and casts.get("remaining", 0) <= 0)
                         a_scalars = (adef or {}).get("ScalesWith")
-                        result.append((aname, a_scalars, adef, slot_item.id, disabled))
+                        display_name = f"{slot_item.Name} : {aname}"
+                        result.append((display_name, a_scalars, adef, slot_item.id, disabled))
         elif ct.combatant_type == "npc":
             npc_cell = self.state.find_object_cell(ct.id)
             if npc_cell:
@@ -1609,6 +1656,9 @@ class GameScreen(tk.Frame):
         menu.add_command(label="Modify Current HP",
                          command=lambda u=pid, pl=player:
                              self._modify_player_hp(u, pl))
+        menu.add_command(label="Modify Actions",
+                         command=lambda u=pid, pl=player:
+                             self._dm_modify_player_actions(u, pl))
         menu.add_command(label="Options",
                          command=lambda u=pid, pl=player:
                              self._dm_player_options(u, pl))
@@ -1678,6 +1728,17 @@ class GameScreen(tk.Frame):
                 "patch": {"Stats": s},
             }),
             multiplier=self.state.settings.hp_base_multiplier,
+        )
+
+    def _dm_modify_player_actions(self, player_uuid: str, player: PlayerObject) -> None:
+        from dialogs.actions_dialog import ActionsDialog
+        ActionsDialog(
+            self.winfo_toplevel(), player, self.prefabs,
+            on_actions_change=lambda actions: self._send({
+                "type": "DM_MODIFY_PLAYER",
+                "player_uuid": player_uuid,
+                "patch": {"Actions": actions},
+            }),
         )
 
     def _dm_player_options(self, player_uuid: str, player: PlayerObject) -> None:
@@ -2017,6 +2078,48 @@ class GameScreen(tk.Frame):
         if self.is_dm and self.server and hasattr(self, "_conn_lbl"):
             n = sum(1 for uid in self.server.clients if uid != self.server.host_uuid)
             ip = self.server.local_ip
-            self._conn_lbl.config(
-                text=f"🔌 {ip}:{self.server.port}   {n} player(s) online"
-            )
+            self._conn_lbl.config(text=f"🔌 {ip}:{self.server.port}")
+            if hasattr(self, "_players_lbl"):
+                self._players_lbl.config(text=f"{n} player(s) online")
+
+    # ── connection-string copy ─────────────────────────────────────────────────
+
+    def _copy_conn_string(self) -> None:
+        """Copy the IP:Port to the clipboard and flash a confirmation bubble."""
+        if not self.server:
+            return
+        text = f"{self.server.local_ip}:{self.server.port}"
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except Exception:
+            pass
+        self._show_copy_bubble()
+
+    def _show_copy_bubble(self) -> None:
+        # Replace any existing bubble so re-clicks restart the 2 s timer
+        if getattr(self, "_copy_bubble", None) is not None:
+            try:
+                self._copy_bubble.destroy()
+            except Exception:
+                pass
+            self._copy_bubble = None
+
+        bub = tk.Label(self, text="Copied to clipboard!",
+                       bg=PALETTE["card"], fg=PALETTE["fg"],
+                       font=FONTS["small"], padx=8, pady=3,
+                       relief=tk.SOLID, bd=1)
+        # 4 px below the 28 px top bar; left offset ≈ the IP:Port label padding
+        bub.place(x=10, y=32)
+        bub.lift()
+        self._copy_bubble = bub
+        self.after(2000, lambda b=bub: self._dismiss_copy_bubble(b))
+
+    def _dismiss_copy_bubble(self, bub) -> None:
+        try:
+            if bub.winfo_exists():
+                bub.destroy()
+        except Exception:
+            pass
+        if getattr(self, "_copy_bubble", None) is bub:
+            self._copy_bubble = None

@@ -17,6 +17,9 @@ from ui.panel import Panel
 from ui.widgets import flat_btn, hr
 
 
+PAGE_SIZE = 25
+
+
 class SpawnPrefabDialog(Panel):
     # Types that may be spawned as grid objects; Action prefabs are picked
     # only via the "+Add Prefab Action" button inside the action form.
@@ -30,9 +33,12 @@ class SpawnPrefabDialog(Panel):
         types = {p.get("type") for p in prefabs}
         if types - {"Action"}:   # contains non-Action → apply spawnable filter
             prefabs = [p for p in prefabs if p.get("type") in self._SPAWNABLE_TYPES]
+        # Sort alphabetically by Name (case-insensitive)
+        prefabs = sorted(prefabs, key=lambda p: str(p.get("Name", "")).lower())
         self._prefabs = prefabs
         self._on_spawn = on_spawn
         self._selected_idx: Optional[int] = None
+        self._page = 0
         self._build_table()
 
     # ── table view ────────────────────────────────────────────────────────────
@@ -77,8 +83,16 @@ class SpawnPrefabDialog(Panel):
 
         self._row_frames: List[tk.Frame] = []
 
-        for i, obj in enumerate(self._prefabs):
-            bg = PALETTE["card2"] if i % 2 == 0 else PALETTE["card"]
+        total = len(self._prefabs)
+        max_page = max(0, (total - 1) // PAGE_SIZE) if total else 0
+        if self._page > max_page:
+            self._page = max_page
+        start = self._page * PAGE_SIZE
+        page_rows = self._prefabs[start:start + PAGE_SIZE]
+
+        for offset, obj in enumerate(page_rows):
+            i = start + offset   # absolute index into self._prefabs
+            bg = PALETTE["card2"] if offset % 2 == 0 else PALETTE["card"]
             row = tk.Frame(inner, bg=bg, cursor="hand2", pady=4)
             row.pack(fill=tk.X)
             self._row_frames.append(row)
@@ -104,6 +118,41 @@ class SpawnPrefabDialog(Panel):
                      font=FONTS["body"], pady=20).pack()
 
         hr(self).pack(fill=tk.X)
+
+        # ── Pagination bar ────────────────────────────────────────────────────
+        if total > PAGE_SIZE:
+            page_bar = tk.Frame(self, bg=PALETTE["card"], padx=10, pady=4)
+            page_bar.pack(fill=tk.X)
+
+            def _prev():
+                if self._page > 0:
+                    self._page -= 1
+                    self._build_table()
+
+            def _next():
+                if (self._page + 1) * PAGE_SIZE < total:
+                    self._page += 1
+                    self._build_table()
+
+            prev_btn = tk.Button(page_bar, text="‹ Prev", command=_prev,
+                                 bg=PALETTE["card2"], fg=PALETTE["fg"],
+                                 relief=tk.FLAT, cursor="hand2",
+                                 font=FONTS["small"], padx=8)
+            prev_btn.pack(side=tk.LEFT)
+            if self._page == 0:
+                prev_btn.config(state=tk.DISABLED)
+            tk.Label(page_bar,
+                     text=f"Page {self._page + 1} / {max_page + 1}   ({total} items)",
+                     bg=PALETTE["card"], fg=PALETTE["muted"],
+                     font=FONTS["small"]).pack(side=tk.LEFT, expand=True)
+            next_btn = tk.Button(page_bar, text="Next ›", command=_next,
+                                 bg=PALETTE["card2"], fg=PALETTE["fg"],
+                                 relief=tk.FLAT, cursor="hand2",
+                                 font=FONTS["small"], padx=8)
+            next_btn.pack(side=tk.RIGHT)
+            if self._page >= max_page:
+                next_btn.config(state=tk.DISABLED)
+
         flat_btn(self, "Cancel", self.close, style="ghost").pack(pady=8)
 
     # ── detail view ───────────────────────────────────────────────────────────
