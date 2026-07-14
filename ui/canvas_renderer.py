@@ -225,6 +225,7 @@ class GameCanvas(tk.Canvas):
             y += cell_px
 
     _GROUND_COLOR = "#ffffff"
+    _ICE_COLOR    = "#dcefff"   # almost-white pale blue
 
     def _draw_tiles(self, min_cx, max_cx, min_cy, max_cy, cell_px) -> None:
         pad = 2 * self.zoom
@@ -248,6 +249,10 @@ class GameCanvas(tk.Canvas):
                 x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
                 self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
                                       fill=self._GROUND_COLOR, outline="", tags="tile")
+            elif tile_type == "ice":
+                x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
+                self.create_rectangle(x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+                                      fill=self._ICE_COLOR, outline="", tags="tile")
             elif tile_type == "water":
                 x0, y0, x1, y1 = self._cell_rect(gx, gy, cell_px)
                 # Extend toward adjacent water to close inter-cell gaps
@@ -291,6 +296,16 @@ class GameCanvas(tk.Canvas):
             return 3
 
     def _draw_combat_highlights(self, cell_px: float) -> None:
+        # Action-target highlights are shown whenever a targeting action is armed
+        # — in OR out of combat (e.g. item "Use" targeting from the inventory).
+        if self._valid_targets:
+            for (tx, ty) in self._valid_targets:
+                x0, y0, x1, y1 = self._cell_rect(tx, ty, cell_px)
+                self.create_rectangle(x0, y0, x1, y1,
+                                      fill="#ff4400", stipple="gray25",
+                                      outline="#ff4400", tags="highlight")
+
+        # Move highlights are combat-only.
         if not (self.state.combat and self.state.combat.active):
             return
         tq = self.state.combat.turn_queue
@@ -304,15 +319,6 @@ class GameCanvas(tk.Canvas):
                 self.create_rectangle(x0, y0, x1, y1,
                                       fill="#3399ff", stipple="gray25",
                                       outline="#3399ff", tags="highlight")
-
-        if self._valid_targets:
-            for (tx, ty) in self._valid_targets:
-                x0, y0, x1, y1 = self._cell_rect(tx, ty, cell_px)
-                self.create_rectangle(x0, y0, x1, y1,
-                                      fill="#ff4400", stipple="gray25",
-                                      outline="#ff4400", tags="highlight")
-
-        # Glow removed per request (item 3)
 
     def _find_combatant_cell(self, turn) -> Optional[Tuple[int, int]]:
         if turn.combatant_type == "player":

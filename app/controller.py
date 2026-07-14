@@ -311,6 +311,14 @@ class App(tk.Tk):
         self._current_screen = screen
 
     def _cleanup_session(self) -> None:
+        # Persist the local player's character before tearing the session down.
+        # Central choke-point covering main-menu navigation and app close.
+        scr = self._current_screen
+        if scr is not None and hasattr(scr, "persist_character"):
+            try:
+                scr.persist_character()
+            except Exception:
+                pass
         if self._client:
             try:
                 self._client.send({"type": "DISCONNECT"})

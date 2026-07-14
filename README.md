@@ -1,7 +1,9 @@
 # Steel2D — Full Technical Requirements
 **Target audience:** Claude Code (automated implementation)  
-**Version:** v0.19  
-**Supersedes:** v0.18
+**Version:** v0.20.0  
+**Supersedes:** v0.19
+
+> Versioning: `x.y.z` — `x` release, `y` patch, `z` bugfix-of-patch.
 
 ---
 
@@ -96,6 +98,7 @@ All packages declared in `requirements.txt`.
 │   ├── spawn_from_prefabs_dialog.py # SpawnFromPrefabsDialog (right-click Spawn Object; paginated)
 │   ├── prefab_select_dialog.py    # PrefabSelectDialog (host-time prefab pack picker)
 │   ├── actions_dialog.py          # ActionsDialog (player K-key / DM Modify Actions)
+│   ├── character_panels.py        # Read-only Inventory + Actions panels (Character Editor)
 │   ├── door_dialog.py             # DoorInteractionDialog (PC side)
 │   ├── inventory_dialog.py        # InventoryDialog
 │   ├── player_list_overlay.py     # PlayerListOverlay (TAB/O key)
@@ -121,7 +124,7 @@ All packages declared in `requirements.txt`.
 │   └── client.py                  # GameClient (asyncio TCP)
 │
 └── ui/
-    ├── panel.py                   # Panel(tk.Frame) — in-app overlay (right-side or top-centre)
+    ├── panel.py                   # Panel(tk.Frame) — in-app overlay (placement: right | left | top)
     ├── widgets.py                 # flat_btn, hr, styled_entry, styled_check
     ├── canvas_renderer.py         # GameCanvas(tk.Canvas)
     └── chat_widget.py             # ChatWidget
@@ -581,7 +584,7 @@ When **network play is on**, the gate is bypassed entirely and any source may co
 [⚙]  (gear icon, top-right; opens BanlistDialog)
 
    STEEL2D
-   v0.19 · multiplayer tabletop lobby
+   v0.20.0 · multiplayer tabletop lobby
    ─────────────────────────────────────────
    [avatar 40x40]  Signed in as  <alias>
    ─────────────────────────────────────────
@@ -635,6 +638,20 @@ Full-window swap (like GameScreen). Fields:
 - Profile Picture (128x128 Canvas preview; Upload / Remove buttons; PIL crop-to-square)
 
 Save persists to `user.config`. Player Name must not contain spaces (enforced on save with an error message).
+
+### 7.3 Character Editor (`CharacterEditorScreen`)
+
+Full-window screen (main-menu **Create / Edit Character**). The centred card edits Character Name, Class, Backstory, Level, Size, Stats (with live max-individual/total validation), read-only auto-calculated Max HP, and an avatar. Saves a `PlayerObject` dict to `character.sav` (msgpack+zlib). Equipment, Inventory, Buffs, **and player-level Actions** are preserved across edits (carried over from the existing save — the editor never drops them).
+
+Two **read-only side panels** flank the card (`dialogs/character_panels.py`):
+
+- **Inventory** (`ReadonlyInventoryPanel`, floated **right**): Equipment slot grid + scrollable Backpack list. **View-only** — hovering any item shows a tooltip (name, description, level, qty/value, slot, actions); no drag, no right-click, no buttons.
+- **Actions** (`ReadonlyActionsPanel`, floated **left**): two tabs —
+  - **Known Actions**: actions on the player object (`PlayerObject.Actions`).
+  - **Item Actions**: actions granted by **equipped** items (labelled with their source item).
+  - Each tab is **searchable** (Name + Description), **sorted alphabetically by Name**, **paginated at 20 rows/page**, and scrollable. Clicking a row opens a **read-only detail window on top** (range, damage, hits, casts, scaling, "Use" effects, and hover-tooltipped buffs).
+
+Both panels are closed when the editor is left (Save or Cancel). The `Panel` base class gained a `placement="left"` mode for the Actions panel.
 
 ---
 
@@ -935,7 +952,7 @@ The renderer uses tkinter's Canvas widget with individual draw calls (rectangle 
 - ~50 filled cells: mild frame-rate drop noticeable.
 - ~200+ filled cells: camera panning becomes jittery; tile spawn/delete operations slow noticeably.
 
-This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.19.
+This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.20.0.
 
 **Workaround:** middle-mouse drag (with a large brush size) over large regions deletes tiles quickly, reducing the cell count and restoring performance. The performance issue is **content-count-driven** (not content-type-driven — ground tiles without any shading cause the same drop as water tiles).
 
@@ -1260,6 +1277,8 @@ Via WASD / arrow keys (also triggers `PLAYER_MOVE`; panning is not available to 
 
 All keys suppressed when any `tk.Entry` or `tk.Text` has keyboard focus. ESC, TAB/O, B, C, K all **toggle** — pressing again closes the panel.
 
+**While a targeting action is armed** (item "Use", §17.6 — or a combat action): **WASD movement is blocked**, and **ESC cancels the targeting** (without opening the ESC menu).
+
 ### 15.4 Stats View (C key)
 
 Shows: alias, Level, HP, Size, all stats with equipment bonuses and buff modifiers. "Edit Stats" sub-view: spinboxes with live clamping. Confirm -> `STATS_UPDATE`.
@@ -1370,6 +1389,27 @@ An item assigned to slot **9 (Throwable)** carries a `ThrownDamage` integer. Whi
 - Range **7**, **1** hit, BaseDamage = `ThrownDamage`, scales **B** with Str and **S** with Dex.
 - On use the server (`_h_player_action`) decrements the item's `Quantity` by 1 and broadcasts the updated player. When `Quantity` reaches **0**, the item is removed from the Throwable slot.
 - The throw is identified server-side by the action name prefix `"Throw "` plus the item occupying `THROWABLE_SLOT`; it is not stored in the item's `Actions`.
+
+### 17.6 "Use" Action (`ITEM_USE`)
+
+A hardcoded **"Use"** action (added to an item's `Actions` via the **"+Use"** button in the action editor). The inventory shows a **Use** option **only when the item has a `"Use"` action** (the old `Consumable` flag no longer drives "Use").
+
+**Targeting:** clicking **Use** closes the inventory and arms targeting on the canvas — the player's **own cell + the 4 orthogonal neighbours** (range 1, including self) are highlighted, regardless of combat state. Highlights are shown for *any* cell (ground, water, wall, door, occupant, even the void). While targeting is armed:
+- **WASD movement is blocked.**
+- **ESC cancels** the action (no menu opens).
+- **Clicking an unhighlighted cell cancels**; clicking a highlighted cell attempts the action.
+
+**Effects (server `_h_item_use`, applied to the clicked cell):**
+- **Damage / buffs** to an NPC/Player occupant when the action has `BaseDamage`/`ScalesWith`/buffs (acts like a regular action).
+- **Unlocks Door** (`UnlocksDoor`): a `Locked` door becomes unlocked.
+- **Breaks Wall** (`BreaksWall`): a Wall occupant is removed.
+- **Freezes Water** (`FreezesWater`): a `water` cell becomes an **`ice`** tile — almost-white pale blue (`#dcefff`), `walkable=True`, functionally identical to ground (holds items, allows pathing/actions); anyone standing on it stops drowning.
+
+These three booleans are **hidden-to-players, DM-only metadata** edited per action instance via the **"Use" effects** checkboxes in the action editor.
+
+**Success & resources:** a use is *successful* only when something actually happened. On success a chat message **`<Alias> used the item [<ItemName>].`** is broadcast (msg_type `item_use`; the bracketed item name is rendered in the item-icon colour `#ff8800`). Casts (if any) decrement by 1; when Casts reach 0 — or the action has no Casts — `Quantity` decrements by 1 (Casts reset to max for the next item in the stack; the item is removed at `Quantity == 0`). When **nothing** happened, the message is **`<Alias> used [<ItemName>] on <the door/the wall/the water/the void/…>. It does nothing. . .`** and **no** resources are consumed.
+
+`tile_type` now includes **`ice`** alongside `ground` / `water`.
 
 ---
 
@@ -1511,6 +1551,14 @@ Single-click selects; double-click loads. **Start** loads the selected save, **D
 
 If loaded with `combat.active == True`, combat resumes from saved state. Players absent from the queue are removed; DM warned if player count differs.
 
+### 20.6 Client Character Persistence on Exit
+
+A PC's live `PlayerObject` (stats, HP, inventory, equipment, buffs, **actions**) is written back to their `character.sav` on **every** exit path, so progress carries between sessions:
+
+- **`GameScreen.persist_character()`** saves the local player object (kept current via STATE_PATCH) directly — it does **not** depend on a server round-trip during teardown, so it survives main-menu, quit, kick, host-shutdown, and dropped-connection cases alike.
+- It is invoked from `_go_main_menu` and `_quit`, and as a safety net from the controller's `_cleanup_session` (which also covers closing the app window). The DM (no `PlayerObject`) is a no-op.
+- The server still also sends authoritative `PLAYER_DATA` on graceful disconnect/kick (handled client-side as a fallback save).
+
 ---
 
 ## 21. Settings & Banlist
@@ -1606,4 +1654,4 @@ All runtime data goes to `%APPDATA%\Steel2D\` (frozen) or project root (dev):
 
 ---
 
-*End of Requirements Document v0.19*
+*End of Requirements Document v0.20.0*

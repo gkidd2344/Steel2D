@@ -124,7 +124,7 @@ class InventoryDialog(Panel):
                     command=lambda it=item: self._inspect(it))
                 inspect_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-                if item.Consumable:
+                if self._has_use(item):
                     use_btn = tk.Button(
                         btn_row, text="Use",
                         bg=PALETTE["card2"], fg=PALETTE["fg"],
@@ -132,7 +132,7 @@ class InventoryDialog(Panel):
                         cursor="hand2",
                         command=lambda it=item: self._use(it))
                     use_btn.pack(side=tk.LEFT, padx=(0, 4))
-                elif item.EquipmentSlot is not None:
+                if item.EquipmentSlot is not None:
                     eq_btn = tk.Button(
                         btn_row, text="Equip",
                         bg=PALETTE["card2"], fg=PALETTE["fg"],
@@ -166,14 +166,19 @@ class InventoryDialog(Panel):
         from dialogs.object_tooltip import ObjectTooltip
         ObjectTooltip(self.winfo_toplevel(), item)
 
+    @staticmethod
+    def _has_use(item: "Item") -> bool:
+        """An item is usable only if it carries a 'Use' action."""
+        return bool(item.Actions) and "Use" in item.Actions
+
     def _item_menu(self, event, item: "Item") -> None:
         menu = tk.Menu(self, tearoff=0, bg=PALETTE["card"],
                        fg=PALETTE["fg"], relief=tk.FLAT)
         menu.add_command(label="Inspect", command=lambda: self._inspect(item))
         menu.add_separator()
-        if item.Consumable:
+        if self._has_use(item):
             menu.add_command(label="Use", command=lambda: self._use(item))
-        else:
+        if item.EquipmentSlot is not None:
             menu.add_command(label="Equip", command=lambda: self._equip(item))
         menu.add_command(label="Drop", command=lambda: self._drop(item))
         menu.add_command(label="Discard", command=lambda: self._discard(item))
@@ -184,6 +189,8 @@ class InventoryDialog(Panel):
                        fg=PALETTE["fg"], relief=tk.FLAT)
         menu.add_command(label="Inspect", command=lambda: self._inspect(item))
         menu.add_separator()
+        if self._has_use(item):
+            menu.add_command(label="Use", command=lambda: self._use(item))
         menu.add_command(label="Unequip → Backpack",
                          command=lambda: self._unequip(slot_id))
         menu.tk_popup(event.x_root, event.y_root)

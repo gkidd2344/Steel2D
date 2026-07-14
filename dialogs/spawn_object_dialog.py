@@ -448,6 +448,10 @@ class SpawnObjectDialog(Panel):
         btn_row.pack(anchor="w", pady=(6, 0))
         flat_btn(btn_row, "+Action", self._pick_prefab_action,
                  style="ghost").pack(side=tk.LEFT)
+        # Hardcoded "Use" action (range 1; customise damage/buffs/casts + effects)
+        flat_btn(btn_row, "+Use", lambda: self._add_action_row(
+            preset={"name": "Use", "range": 1}),
+            style="ghost").pack(side=tk.LEFT, padx=(6, 0))
 
     def _pick_prefab_action(self) -> None:
         # Merge session objects (DM Workshop table) + loaded prefabs
@@ -518,6 +522,10 @@ class SpawnObjectDialog(Panel):
             "has_scales":    tk.BooleanVar(value=bool(sw_preset)),
             "scales_with":   {k: tk.StringVar(value=sw_preset.get(k, ""))
                               for k in STAT_KEYS},
+            # "Use" effects (DM-only metadata; only meaningful for a "Use" action)
+            "unlocks_door":  tk.BooleanVar(value=bool(preset.get("unlocks_door"))),
+            "freezes_water": tk.BooleanVar(value=bool(preset.get("freezes_water"))),
+            "breaks_wall":   tk.BooleanVar(value=bool(preset.get("breaks_wall"))),
         }
         self._action_rows.append(row_data)
 
@@ -681,6 +689,20 @@ class SpawnObjectDialog(Panel):
             if row_data["has_scales"].get():
                 sw_sub.pack(fill=tk.X, pady=(2, 0))
 
+        # ── "Use" effects (DM-only; apply when the action is named "Use") ─────
+        use_fx = tk.Frame(outer, bg=PALETTE["card2"])
+        use_fx.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(use_fx, text='"Use" effects', bg=PALETTE["card2"],
+                 fg=PALETTE["muted"], font=FONTS["small"]).pack(anchor="w", padx=4)
+        fx_row = tk.Frame(use_fx, bg=PALETTE["card2"])
+        fx_row.pack(fill=tk.X)
+        styled_check(fx_row, "Unlocks Door", row_data["unlocks_door"],
+                     bg=PALETTE["card2"]).pack(side=tk.LEFT, padx=4)
+        styled_check(fx_row, "Freezes Water", row_data["freezes_water"],
+                     bg=PALETTE["card2"]).pack(side=tk.LEFT, padx=4)
+        styled_check(fx_row, "Breaks Wall", row_data["breaks_wall"],
+                     bg=PALETTE["card2"]).pack(side=tk.LEFT, padx=4)
+
         self._update_scroll()
 
     # ── pre-fill ──────────────────────────────────────────────────────────────
@@ -735,13 +757,17 @@ class SpawnObjectDialog(Panel):
                     "BuffDuration": action.get("BuffDuration", 5),
                 }
             self._add_action_row(preset={
-                "name":       name,
-                "desc":       action.get("Description", ""),
-                "range":      action.get("Range", 1),
-                "damage":     action.get("BaseDamage", 0),
-                "hits":       action.get("Hits", 1),
-                "casts":      casts,
-                "gives_buff": pb,
+                "name":          name,
+                "desc":          action.get("Description", ""),
+                "range":         action.get("Range", 1),
+                "damage":        action.get("BaseDamage", 0),
+                "hits":          action.get("Hits", 1),
+                "casts":         casts,
+                "gives_buff":    pb,
+                "ScalesWith":    action.get("ScalesWith", {}),
+                "unlocks_door":  action.get("UnlocksDoor", False),
+                "freezes_water": action.get("FreezesWater", False),
+                "breaks_wall":   action.get("BreaksWall", False),
             })
 
     # ── result collection ─────────────────────────────────────────────────────
@@ -777,6 +803,13 @@ class SpawnObjectDialog(Panel):
                       if v.get()}
                 if sw:
                     action["ScalesWith"] = sw
+            # "Use" effect metadata (only persisted when set)
+            if row.get("unlocks_door") and row["unlocks_door"].get():
+                action["UnlocksDoor"] = True
+            if row.get("freezes_water") and row["freezes_water"].get():
+                action["FreezesWater"] = True
+            if row.get("breaks_wall") and row["breaks_wall"].get():
+                action["BreaksWall"] = True
             result[name] = action
         return result or None
 

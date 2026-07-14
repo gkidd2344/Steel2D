@@ -189,12 +189,33 @@ class CharacterEditorScreen(tk.Frame):
         btn_row.pack(anchor="e")
         flat_btn(btn_row, "Save Character", self._save,
                  style="normal").pack(side=tk.LEFT, padx=(0, 8), ipadx=8)
-        flat_btn(btn_row, "Cancel", self._on_cancel,
+        flat_btn(btn_row, "Cancel", self._cancel,
                  style="ghost").pack(side=tk.LEFT)
 
         # Pre-fill from existing character file
         if self._existing:
             self._prefill(self._existing)
+
+        # ── Flanking read-only side panels (Actions left, Inventory right) ────
+        from dialogs.character_panels import (
+            ReadonlyInventoryPanel, ReadonlyActionsPanel)
+        char = self._existing or {}
+        self._inv_panel = ReadonlyInventoryPanel(self, char)
+        self._act_panel = ReadonlyActionsPanel(self, char)
+
+    def _close_side_panels(self) -> None:
+        for attr in ("_inv_panel", "_act_panel"):
+            p = getattr(self, attr, None)
+            if p is not None:
+                try:
+                    p.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _cancel(self) -> None:
+        self._close_side_panels()
+        self._on_cancel()
 
     # ── pre-fill ──────────────────────────────────────────────────────────────
 
@@ -347,6 +368,7 @@ class CharacterEditorScreen(tk.Frame):
             "Inventory":     existing.get("Inventory", []),
             "avatar_png":    self._avatar_b64,
             "Buffs":         existing.get("Buffs", []),
+            "Actions":       existing.get("Actions"),
         }
 
         try:
@@ -355,4 +377,5 @@ class CharacterEditorScreen(tk.Frame):
             messagebox.showerror("Save Error", str(e))
             return
 
+        self._close_side_panels()
         self._on_save()

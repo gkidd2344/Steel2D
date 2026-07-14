@@ -1091,18 +1091,171 @@ class GameServer:
         patches = [{"op": "set_player", "path": pid, "value": player.to_dict()}]
         await self._broadcast({"type": "STATE_PATCH", "patches": patches})
 
+    @staticmethod
+    def _use_target_descriptor(cell, occ, players_here) -> str:
+        """Human-readable name of what a 'Use' action was aimed at (for chat)."""
+        if cell is None:
+            return "the void"
+        if isinstance(occ, Door):
+            return "the door"
+        if isinstance(occ, Wall):
+            return "the wall"
+        if isinstance(occ, Stairs):
+            return "the stairs"
+        if isinstance(occ, NPC):
+            return occ.Name or "the creature"
+        if isinstance(occ, Item):
+            return f"the {occ.Name}" if occ.Name else "the item"
+        if players_here:
+            return players_here
+        tt = getattr(cell, "tile_type", "ground")
+        if tt == "water":
+            return "the water"
+        if tt == "ice":
+            return "the ice"
+        return "the ground"
+
+    async def _broadcast_item_use_chat(self, text: str, item_name: str) -> None:
+        await self._broadcast({"type": "CHAT_RECV", "message": {
+            "sender_uuid": "SYSTEM", "sender_alias": "",
+            "content": text, "msg_type": "item_use",
+            "item_name": item_name,
+            "recipient_uuid": None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }})
+
     async def _h_item_use(self, conn: ClientConn, msg: dict) -> None:
         pid = conn.uuid
         player = self.state.players.get(pid)
         if not player:
             return
         item_id = msg.get("item_id", "")
+
+        # Locate the item in the backpack or an equipment slot
         item = next((i for i in player.Inventory if i.id == item_id), None)
-        if not item or not item.Consumable:
+        where = "inv"
+        if item is None:
+            for slot, eq in list(player.Equipment.items()):
+                if eq.id == item_id:
+                    item, where = eq, ("equip", slot)
+                    break
+        if item is None:
             return
-        player.Inventory.remove(item)
-        patches = [{"op": "set_player", "path": pid, "value": player.to_dict()}]
-        await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+        action = (item.Actions or {}).get("Use")
+        if not action:
+            return
+
+        tc = msg.get("target_cell", [0, 0])
+        tx, ty = int(tc[0]), int(tc[1])
+        cell = self.state.grid.get((tx, ty))
+        occ = cell.occupant if cell else None
+
+        # Block early if Casts are exhausted
+        casts = action.get("Casts")
+        if casts and casts.get("remaining", 0) <= 0:
+            await conn.send({"type": "CHAT_ERROR",
+                             "text": f"{item.Name} has no uses remaining."})
+            return
+
+        # Resolve a damage/buff target (NPC or Player occupying the cell)
+        target = None
+        players_here_name = ""
+        if isinstance(occ, NPC):
+            target = occ
+        else:
+            for upid in self.state.players_at.get(f"{tx},{ty}", []):
+                tp = self.state.players.get(upid)
+                if tp:
+                    target = tp
+                    players_here_name = tp.Name
+                    break
+
+        has_damage = bool(action.get("BaseDamage", 0)) or bool(action.get("ScalesWith"))
+        has_buffs = bool(action.get("GivesBuffs")) or bool(action.get("GivesBuff"))
+
+        success = False
+        patches = []
+
+        # 1. Damage / buffs (acts like a regular action on an occupant)
+        if target is not None and (has_damage or has_buffs):
+            scalars = action.get("ScalesWith")
+            total = apply_action(player, scalars, action, target, self.state.settings)
+            await self._apply_damage_and_buffs(
+                attacker=player, target=target, total=total,
+                action=action, cell=(tx, ty),
+                attacker_name=player.Name, action_name="Use")
+            success = True
+
+        # 2. Unlocks Door
+        if action.get("UnlocksDoor") and isinstance(occ, Door) and occ.Locked:
+            occ.Locked = False
+            patches.append({"op": "set_cell", "path": f"{tx},{ty}",
+                            "value": cell.to_dict()})
+            success = True
+
+        # 3. Breaks Wall
+        if action.get("BreaksWall") and isinstance(occ, Wall):
+            cell.occupant = None
+            patches.append({"op": "set_cell", "path": f"{tx},{ty}",
+                            "value": cell.to_dict()})
+            success = True
+
+        # 4. Freezes Water → Ice (walkable, ground-like)
+        if action.get("FreezesWater") and cell and cell.tile_type == "water":
+            cell.tile_type = "ice"
+            cell.walkable = True
+            patches.append({"op": "set_cell", "path": f"{tx},{ty}",
+                            "value": cell.to_dict()})
+            # Anyone standing on the newly-frozen cell stops drowning
+            for upid in self.state.players_at.get(f"{tx},{ty}", []):
+                self._water_ticks[upid] = 0
+                sp = self.state.players.get(upid)
+                if sp and isinstance(sp.Buffs, list):
+                    before = len(sp.Buffs)
+                    sp.Buffs[:] = [b for b in sp.Buffs if b.get("Name") != "Drowning"]
+                    if len(sp.Buffs) != before:
+                        patches.append({"op": "set_player", "path": upid,
+                                        "value": sp.to_dict()})
+            success = True
+
+        if patches:
+            await self._broadcast({"type": "STATE_PATCH", "patches": patches})
+
+        # Nothing happened — no chat-name colour change, no resource cost
+        desc = self._use_target_descriptor(cell, occ, players_here_name)
+        if not success:
+            await self._broadcast_item_use_chat(
+                f"{player.Name} used [{item.Name}] on {desc}. Nothing happens...",
+                item.Name)
+            return
+
+        # Success message
+        await self._broadcast_item_use_chat(
+            f"{player.Name} used the item [{item.Name}] on {desc}.", item.Name)
+
+        # ── Casts / quantity bookkeeping ──────────────────────────────────────
+        consume_qty = False
+        if casts:
+            casts["remaining"] = max(0, casts.get("remaining", 0) - 1)
+            if casts["remaining"] <= 0:
+                consume_qty = True
+        else:
+            consume_qty = True
+
+        if consume_qty:
+            item.Quantity -= 1
+            if item.Quantity > 0 and casts:
+                casts["remaining"] = casts.get("max_per_rest", 0)  # fresh charge
+            if item.Quantity <= 0:
+                if where == "inv":
+                    if item in player.Inventory:
+                        player.Inventory.remove(item)
+                else:
+                    player.Equipment.pop(where[1], None)
+
+        await self._broadcast({"type": "STATE_PATCH",
+                               "patches": [{"op": "set_player", "path": pid,
+                                            "value": player.to_dict()}]})
 
     async def _h_item_equip(self, conn: ClientConn, msg: dict) -> None:
         pid = conn.uuid

@@ -16,6 +16,8 @@ DM_COLOR    = "#ff9500"    # orange for [DM] tag
 YELL_COLOR  = "#f07060"    # salmon for /y
 WHISPER_COLOR = "#9090cc"
 
+ITEM_COLOR = "#ff8800"     # matches the in-world Item icon colour
+
 TAG_COLOURS = {
     "normal":         "#e6e6f0",
     "yell":           YELL_COLOR,
@@ -27,6 +29,8 @@ TAG_COLOURS = {
     "combat_damage":  "#ff4444",
     "combat_heal":    "#44ff88",
     "combat_fizzle":  "#888888",
+    "item_use":       "#e6e6f0",
+    "item_color":     ITEM_COLOR,
 }
 
 
@@ -157,7 +161,18 @@ class ChatWidget(tk.Frame):
 
         self._text.config(state=tk.NORMAL)
 
-        if msg_type in ("system", "error", "combat_damage", "combat_heal", "combat_fizzle"):
+        if msg_type == "item_use":
+            # Colour the bracketed [ItemName] like the item icon; rest neutral.
+            item_name = msg.get("item_name", "")
+            token = f"[{item_name}]" if item_name else ""
+            idx = content.find(token) if token else -1
+            if idx >= 0:
+                self._text.insert(tk.END, content[:idx], "item_use")
+                self._text.insert(tk.END, token, "item_color")
+                self._text.insert(tk.END, content[idx + len(token):] + "\n", "item_use")
+            else:
+                self._text.insert(tk.END, content + "\n", "item_use")
+        elif msg_type in ("system", "error", "combat_damage", "combat_heal", "combat_fizzle"):
             tag = msg_type if msg_type in TAG_COLOURS else "system"
             self._text.insert(tk.END, content + "\n", tag)
         elif msg_type == "whisper":

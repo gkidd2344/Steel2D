@@ -41,6 +41,9 @@ class Panel(tk.Frame):
         if placement == "top":
             # Top-centre — used for short blocking confirmations (Door, Stairs, etc.)
             self.place(relx=0.5, rely=0.0, y=16, anchor="n")
+        elif placement == "left":
+            # Left-centre — used to flank a centred screen (e.g. Character editor)
+            self.place(relx=0.0, x=10, rely=0.5, anchor="w")
         else:
             # Right-centre — default for most panels
             self.place(relx=1.0, x=-10, rely=0.5, anchor="e")

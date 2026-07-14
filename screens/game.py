@@ -237,6 +237,9 @@ class GameScreen(tk.Frame):
         # Block PC movement while a blocking interaction dialogue is open
         if not self.is_dm and self._is_interaction_active():
             return
+        # Block PC movement while a targeting action (e.g. item "Use") is armed
+        if not self.is_dm and self._is_targeting():
+            return
         key = event.keysym.lower()
         if key not in self._PAN_KEY_MAP:
             return
@@ -562,6 +565,10 @@ class GameScreen(tk.Frame):
         if self._is_chat_focused():
             self._chat.blur_input()
             return
+        # A targeting action (e.g. item "Use") is armed → cancel it, no menu
+        if self._is_targeting():
+            self._cancel_targeting()
+            return
         if self._esc_panel and not self._esc_panel._closing:
             self._esc_panel.close()
             self._esc_panel = None
@@ -599,11 +606,38 @@ class GameScreen(tk.Frame):
         from dialogs.inventory_dialog import InventoryDialog
         self._b_panel = InventoryDialog(
             self.winfo_toplevel(), player,
-            on_use=lambda iid: self._send({"type": "ITEM_USE", "item_id": iid}),
+            on_use=lambda iid: self._start_item_use(iid),
             on_equip=lambda iid: self._send({"type": "ITEM_EQUIP", "item_id": iid}),
             on_drop=lambda iid: self._send({"type": "ITEM_DROP", "item_id": iid}),
             on_discard=lambda iid: self._send({"type": "ITEM_DISCARD", "item_id": iid}),
         )
+
+    def _start_item_use(self, item_id: str) -> None:
+        """Begin 'Use' targeting: highlight the player's cell + 4 orthogonal
+        neighbours (range 1, incl. self). Clicking one sends ITEM_USE."""
+        player = self.state.players.get(self.local_uuid)
+        if not player:
+            return
+        item = next((i for i in player.Inventory if i.id == item_id), None)
+        if item is None:
+            item = next((it for it in player.Equipment.values()
+                         if it.id == item_id), None)
+        if item is None or not (item.Actions and "Use" in item.Actions):
+            return
+        pc = self._canvas._player_cell()
+        if not pc:
+            return
+        px, py = pc
+        targets = {(px, py), (px + 1, py), (px - 1, py),
+                   (px, py + 1), (px, py - 1)}
+
+        def _on_target(tx, ty):
+            self._send({"type": "ITEM_USE", "item_id": item_id,
+                        "target_cell": [tx, ty]})
+
+        self._canvas.set_combat_action(
+            {"item_id": item_id, "action_name": "Use", "_on_target": _on_target},
+            targets)
 
     def _on_c(self, event) -> None:
         if self._is_chat_focused():
@@ -1260,6 +1294,18 @@ class GameScreen(tk.Frame):
                     and self._interaction_panel.winfo_exists())
         except Exception:
             return False
+
+    def _is_targeting(self) -> bool:
+        """True when a targeting action (combat action or item 'Use') is armed."""
+        return getattr(self._canvas, "_combat_action", None) is not None
+
+    def _cancel_targeting(self) -> None:
+        """Disarm any active targeting (item 'Use' / combat action) without
+        opening a menu, and reset the combat panel back to its normal mode."""
+        self._canvas.set_combat_action(None, set())
+        self._canvas.set_combat_move_mode(False)
+        self._combat_ui_mode = "normal"
+        self._rebuild_combat_actions_panel()
 
     @staticmethod
     def _show_disconnected_notice(root) -> None:
@@ -1957,7 +2003,27 @@ class GameScreen(tk.Frame):
         flat_btn(btn_row, "Apply", _apply, style="normal").pack(side=tk.LEFT, padx=(0, 8))
         flat_btn(btn_row, "Cancel", panel.close, style="ghost").pack(side=tk.LEFT)
 
+    def persist_character(self) -> None:
+        """Save the local player's current object to character.sav (PC only).
+
+        This is the authoritative client-side save on any exit (main menu, quit,
+        kick, host shutdown, or dropped connection): the local player object is
+        kept current via STATE_PATCH, so it is the most reliable snapshot to
+        persist — no dependence on a server round-trip during teardown.
+        """
+        if self.is_dm:
+            return
+        player = self.state.players.get(self.local_uuid)
+        if not player:
+            return
+        try:
+            from app.config import save_character
+            save_character(player.to_dict())
+        except Exception:
+            pass
+
     def _go_main_menu(self) -> None:
+        self.persist_character()
         if self.client:
             self.client.send({"type": "DISCONNECT"})
             self.client.stop()
@@ -1967,6 +2033,7 @@ class GameScreen(tk.Frame):
         root.event_generate("<<GoMainMenu>>")
 
     def _quit(self) -> None:
+        self.persist_character()
         if self.client:
             self.client.send({"type": "DISCONNECT"})
         root = self.winfo_toplevel()
