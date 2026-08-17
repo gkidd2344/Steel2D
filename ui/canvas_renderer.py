@@ -876,10 +876,6 @@ class GameCanvas(tk.Canvas):
                 self._painting = False
                 return  # NPC movement (above) already handled; everything else blocked
 
-            # ── Guard: never paint over protected cells ───────────────────────
-            if cell and cell.protected and (self.y_held or self.u_held):
-                return
-
             if self.y_held:
                 self._painting = True
                 self._paint_type = "wall"
@@ -888,7 +884,7 @@ class GameCanvas(tk.Canvas):
                 return
 
             if self.u_held:
-                if (cell and cell.protected) or (cell and cell.occupant):
+                if cell and cell.occupant:
                     self._painting = False
                     return
                 self._painting = True
@@ -910,9 +906,6 @@ class GameCanvas(tk.Canvas):
                     self._drag_mouse = (event.x, event.y)
                     self._painting = False
             else:
-                if cell and cell.protected:
-                    self._painting = False
-                    return
                 tile_type = cell.tile_type if cell else None
                 if cell is None or not cell.walkable or tile_type == "water":
                     self._painting = True
@@ -1019,8 +1012,6 @@ class GameCanvas(tk.Canvas):
         cell = self.state.grid.get((gx, gy))
         if not cell:
             return   # nothing to erase
-        if cell.protected:
-            return
         # Skip if a player is on this cell or within 1-tile radius
         if self.state.players_at.get(f"{gx},{gy}"):
             return
@@ -1097,13 +1088,13 @@ class GameCanvas(tk.Canvas):
                     self.send({"type": "DM_DELETE_OBJECT", "cell": [bx, by]})
 
             elif pt == "wall":
-                if cell and (cell.protected or cell.occupant):
+                if cell and cell.occupant:
                     continue
                 self._painted_cells.add((bx, by))
                 self._place_wall_at(bx, by)
 
             elif pt == "water":
-                if (cell and cell.protected) or (cell and cell.occupant):
+                if cell and cell.occupant:
                     continue
                 if cell is None or (cell.tile_type == "ground" and not cell.occupant):
                     self._painted_cells.add((bx, by))
@@ -1112,8 +1103,6 @@ class GameCanvas(tk.Canvas):
                                "tile_type": "water"})
 
             else:  # ground
-                if cell and cell.protected:
-                    continue
                 if cell and isinstance(cell.occupant, Wall):
                     self._painted_cells.add((bx, by))
                     self.send({"type": "DM_DELETE_OBJECT", "cell": [bx, by]})

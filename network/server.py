@@ -1364,15 +1364,8 @@ class GameServer:
         key = (cx, cy)
         existing = self.state.grid.get(key)
 
-        # Never modify protected cells (initial 4×4 spawn area)
-        if existing and existing.protected:
-            return
-
         if not walkable and tile_type != "water":
             # Delete tile (middle-click erase)
-            cell = self.state.grid.get(key)
-            if cell and cell.protected:
-                return
             if key in self.state.grid:
                 del self.state.grid[key]
             patches = [{"op": "del_cell", "path": f"{cx},{cy}"}]
@@ -1396,9 +1389,6 @@ class GameServer:
         cx, cy = int(cc[0]), int(cc[1])
         cell = self.state.grid.get((cx, cy))
         if not cell or not cell.walkable:
-            return
-        # Protected cells (initial 4×4) cannot have objects spawned in them
-        if cell.protected:
             return
         obj_d = msg.get("object", {})
         obj_d["id"] = str(uuid.uuid4())

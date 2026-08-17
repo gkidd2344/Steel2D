@@ -30,23 +30,22 @@ class GameSettings:
 @dataclass
 class Cell:
     walkable: bool = False
-    protected: bool = False
-    tile_type: str = "ground"   # "ground" | "water"
+    tile_type: str = "ground"   # "ground" | "water" | "ice"
     occupant: Optional[Union[NPC, Item, Door]] = None
 
     def to_dict(self) -> dict:
         return {
             "walkable": self.walkable,
-            "protected": self.protected,
             "tile_type": self.tile_type,
             "occupant": self.occupant.to_dict() if self.occupant else None,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Cell":
+        # NOTE: the legacy "protected" flag (initial 4x4 spawn area) is
+        # intentionally ignored — every tile is now freely editable by the DM.
         return cls(
             walkable=d.get("walkable", False),
-            protected=d.get("protected", False),
             tile_type=d.get("tile_type", "ground"),
             occupant=occupant_from_dict(d.get("occupant")),
         )
@@ -237,5 +236,5 @@ def make_initial_state(name: str, settings: GameSettings) -> GameState:
     state = GameState(name=name, settings=settings)
     for x in range(4):
         for y in range(4):
-            state.grid[(x, y)] = Cell(walkable=True, protected=True)
+            state.grid[(x, y)] = Cell(walkable=True)
     return state

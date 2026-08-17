@@ -1460,7 +1460,6 @@ class GameScreen(tk.Frame):
 
         obj = grid_cell.occupant
         uuids = self.state.players_at.get(f"{gx},{gy}", [])
-        is_protected = bool(grid_cell.protected)
 
         if obj:
             from game.objects import Wall as _Wall, Door as _Door, Stairs as _Stairs
@@ -1468,15 +1467,13 @@ class GameScreen(tk.Frame):
                 menu.add_command(label="Modify Stairs",
                                  command=lambda s=obj, c=(gx, gy):
                                      self._dm_modify_stairs(s, c))
-                if not is_protected:
-                    menu.add_command(label="Delete Stairs",
-                                     command=lambda: self._send(
-                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+                menu.add_command(label="Delete Stairs",
+                                 command=lambda: self._send(
+                                     {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
             elif isinstance(obj, _Wall):
-                if not is_protected:
-                    menu.add_command(label="Delete Wall",
-                                     command=lambda: self._send(
-                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+                menu.add_command(label="Delete Wall",
+                                 command=lambda: self._send(
+                                     {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
             elif isinstance(obj, _Door):
                 # Door-specific toggles (item 3)
                 d = obj
@@ -1495,19 +1492,18 @@ class GameScreen(tk.Frame):
                     command=lambda _d=d: self._send({
                         "type": "DM_MODIFY_OBJECT", "cell": [gx, gy],
                         "object": {**_d.to_dict(), "Locked": not _d.Locked}}))
-                if not is_protected:
-                    menu.add_separator()
-                    menu.add_command(label="Delete Door",
-                                     command=lambda: self._send(
-                                         {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
-            elif not is_protected:
+                menu.add_separator()
+                menu.add_command(label="Delete Door",
+                                 command=lambda: self._send(
+                                     {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
+            else:
                 menu.add_command(label="Modify Object",
                                  command=lambda: self._dm_modify_object(gx, gy, obj))
                 menu.add_command(label="Delete Object",
                                  command=lambda: self._send(
                                      {"type": "DM_DELETE_OBJECT", "cell": [gx, gy]}))
 
-            if isinstance(obj, NPC) and not is_protected:
+            if isinstance(obj, NPC):
                 menu.add_separator()
                 enc_ids = self.state.combat.encounter_npc_ids if self.state.combat else []
                 if obj.id in enc_ids:
@@ -1526,7 +1522,7 @@ class GameScreen(tk.Frame):
                 menu.add_command(label="Speak as NPC…",
                                  command=lambda _o=obj: self._dm_speak_as_npc(_o))
 
-        elif not is_protected:
+        else:
             # Unoccupied ground — spawn options
             import uuid as _uuid_mod
             menu.add_command(label="Spawn Object",
@@ -1556,12 +1552,11 @@ class GameScreen(tk.Frame):
                 self._add_player_menu_section(menu, pid, p)
 
         if grid_cell.walkable:
-            if not is_protected:
-                menu.add_separator()
-                menu.add_command(label="Delete Tile",
-                                 command=lambda: self._send(
-                                     {"type": "DM_TILE_SET", "cell": [gx, gy],
-                                      "walkable": False}))
+            menu.add_separator()
+            menu.add_command(label="Delete Tile",
+                             command=lambda: self._send(
+                                 {"type": "DM_TILE_SET", "cell": [gx, gy],
+                                  "walkable": False}))
             # Warp Player Here — only on a fully empty ground tile (no object,
             # no players). The tile is therefore already a valid destination.
             if grid_cell.occupant is None and not uuids:

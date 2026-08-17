@@ -970,23 +970,38 @@ class _EmbeddedSpawnForm(tk.Frame):
         self._on_add(obj)
         self.after_idle(self._render_body)
 
-    # ── borrow SpawnObjectDialog form methods ─────────────────────────────────
 
-    from dialogs.spawn_object_dialog import SpawnObjectDialog as _S
-    _update_scroll       = _S._update_scroll
-    _make_section        = _S._make_section
-    _lbl                 = _S._lbl
-    _spinbox             = _S._spinbox
-    _field_row           = _S._field_row
-    _build_npc_form      = _S._build_npc_form
-    _build_item_form     = _S._build_item_form
-    _recalc_npc_hp       = _S._recalc_npc_hp
-    _validate_npc_stats  = _S._validate_npc_stats
-    _validate_item_stats = _S._validate_item_stats
-    _add_action_row      = _S._add_action_row
-    _build_action_buttons= _S._build_action_buttons
-    _pick_prefab_action  = _S._pick_prefab_action
-    _collect_actions     = _S._collect_actions
-    _build_result_dict   = _S._build_result_dict
-    _fill_actions        = _S._fill_actions
-    del _S
+# ── borrow SpawnObjectDialog form methods ────────────────────────────────────
+#
+# The embedded prefab form reuses SpawnObjectDialog's field/section builders
+# verbatim. These are copied automatically rather than hand-listed: a manual
+# list silently breaks this screen (renders an empty form) whenever a new
+# helper is added to the dialog's NPC/Item forms.
+
+from dialogs.spawn_object_dialog import SpawnObjectDialog as _SpawnObjectDialog
+
+# Dialog methods that belong to its window/lifecycle rather than its form —
+# the embedded Frame has no Panel API and supplies its own equivalents.
+_DIALOG_ONLY_METHODS = {
+    "_build",             # embedded builds its own chrome
+    "_render_body",       # embedded handles Action/Buff types too
+    "_on_type_change",
+    "_on_body_configure",
+    "_on_canvas_configure",
+    "_on_mousewheel",     # embedded scrolls via _bind_scroll_children
+    "_do_spawn",          # embedded uses _do_add
+    "_pre_fill",          # embedded never edits an existing object
+}
+
+
+def _borrow_form_methods(target, source, skip) -> None:
+    """Copy every form-building method `source` defines that `target` doesn't
+    already override and that isn't window/lifecycle-only."""
+    for name, fn in vars(source).items():
+        if (callable(fn) and not name.startswith("__")
+                and name not in skip and name not in vars(target)):
+            setattr(target, name, fn)
+
+
+_borrow_form_methods(_EmbeddedSpawnForm, _SpawnObjectDialog,
+                     _DIALOG_ONLY_METHODS)
