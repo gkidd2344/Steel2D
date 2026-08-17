@@ -45,10 +45,28 @@ echo Found Python: %PYTHON%
 %PYTHON% --version
 echo.
 
+:: The venv is used ONLY via its explicit python.exe (never activate.bat or
+:: bare pip/pyinstaller). Venvs are not relocatable: if the project folder is
+:: renamed or Python is upgraded, activate.bat and the Scripts\*.exe launchers
+:: keep stale absolute paths -- but "<venv>\python.exe -m <module>" keeps
+:: working, and the health check below recreates truly broken venvs.
+set VENV_PY=.venv\Scripts\python.exe
+
+echo [0/5] Pulling any changes from GitHub before build...
+git pull
+echo.
+
 echo [1/5] Creating virtual environment...
-if exist ".venv" (
-    echo        .venv already exists.
-) else (
+if exist "%VENV_PY%" (
+    "%VENV_PY%" -c "import sys" >nul 2>&1
+    if !errorlevel!==0 (
+        echo        .venv already exists and is healthy.
+    ) else (
+        echo        .venv is broken or stale -- recreating...
+        rmdir /s /q ".venv"
+    )
+)
+if not exist "%VENV_PY%" (
     %PYTHON% -m venv .venv
     if errorlevel 1 (
         echo ERROR: Failed to create virtual environment.
@@ -58,9 +76,8 @@ if exist ".venv" (
 )
 
 echo [2/5] Installing dependencies...
-call .venv\Scripts\activate.bat
-pip install --upgrade pip --quiet
-pip install Pillow>=10.0 msgpack>=1.0 pyinstaller>=6.0 --quiet
+"%VENV_PY%" -m pip install --upgrade pip --quiet
+"%VENV_PY%" -m pip install "Pillow>=10.0" "msgpack>=1.0" "pyinstaller>=6.0" --quiet
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     pause
@@ -68,7 +85,7 @@ if errorlevel 1 (
 )
 
 echo [3/5] Building executable with PyInstaller...
-pyinstaller --clean --noconfirm Steel2D.spec
+"%VENV_PY%" -m PyInstaller --clean --noconfirm Steel2D.spec
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed. Check output above for details.
     pause
@@ -89,9 +106,9 @@ echo [5/5] Done!
 echo.
 echo ============================================================
 echo  Executable : dist\Steel2D\Steel2D.exe
-echo  Portable   : dist\Steel2D.zip
+echo  Portable   : Steel2D.zip  (project root)
 echo.
-echo  To distribute, share dist\Steel2D.zip
+echo  To distribute, share Steel2D.zip
 echo  Recipient extracts the zip and double-clicks Steel2D.exe
 echo  No installation or Python required.
 echo  Game data goes to: %%APPDATA%%\Steel2D\

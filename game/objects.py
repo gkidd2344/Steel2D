@@ -45,6 +45,16 @@ class NPC:
     Actions: Optional[Dict[str, dict]] = None
     TurnsAllowed: int = 1
     Buffs: List[dict] = field(default_factory=list)
+    # ── Player stand-in (DM-controlled NPC that renders as a player token) ────
+    IsPlayer: bool = False
+    PlayerName: str = ""              # token label; falls back to Name if blank
+    PlayerColor: str = "#ffffff"      # token fill/border (see app.constants palette)
+    avatar_png: Optional[bytes] = None  # token picture
+
+    @property
+    def token_name(self) -> str:
+        """Name shown on a player stand-in token (falls back to the NPC name)."""
+        return (self.PlayerName or "").strip() or self.Name
 
     def to_dict(self) -> dict:
         return {
@@ -62,10 +72,25 @@ class NPC:
             "Actions": self.Actions,
             "TurnsAllowed": self.TurnsAllowed,
             "Buffs": self.Buffs,
+            "IsPlayer": self.IsPlayer,
+            "PlayerName": self.PlayerName,
+            "PlayerColor": self.PlayerColor,
+            "avatar_png": (base64.b64encode(self.avatar_png).decode()
+                           if self.avatar_png else None),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "NPC":
+        avatar_raw = d.get("avatar_png")
+        if isinstance(avatar_raw, str) and avatar_raw:
+            try:
+                avatar_png = base64.b64decode(avatar_raw)
+            except Exception:
+                avatar_png = None
+        elif isinstance(avatar_raw, (bytes, bytearray)):
+            avatar_png = bytes(avatar_raw)
+        else:
+            avatar_png = None
         return cls(
             id=d["id"],
             type=d.get("type", "NPC"),
@@ -81,6 +106,10 @@ class NPC:
             Actions=d.get("Actions"),
             TurnsAllowed=max(1, int(d.get("TurnsAllowed", 1))),
             Buffs=_migrate_buffs(d.get("Buffs", [])),
+            IsPlayer=bool(d.get("IsPlayer", False)),
+            PlayerName=d.get("PlayerName", "") or "",
+            PlayerColor=d.get("PlayerColor") or "#ffffff",
+            avatar_png=avatar_png,
         )
 
 

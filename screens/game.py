@@ -299,6 +299,8 @@ class GameScreen(tk.Frame):
             patches = payload.get("patches", [])
             self._apply_patches(patches)
             self._refresh_combat_ui()
+            # Any state change requires a full scene redraw (dirty-flag renderer)
+            self._canvas.mark_dirty()
 
             # Invalidate water depth cache whenever cells change
             if any(p.get("op") in ("set_cell", "del_cell") for p in patches):
@@ -433,6 +435,7 @@ class GameScreen(tk.Frame):
     def _update_connected_uuids(self) -> None:
         """Propagate the current connected-UUID set to the canvas."""
         self._canvas._connected_uuids = self._connected_uuids
+        self._canvas.mark_dirty()   # avatar/border rendering depends on this
 
     def _apply_patches(self, patches: list) -> None:
         for patch in patches:
@@ -441,7 +444,20 @@ class GameScreen(tk.Frame):
             value = patch.get("value")
             if op == "set_cell":
                 x, y = map(int, path.split(","))
-                self.state.grid[(x, y)] = Cell.from_dict(value)
+                old_cell = self.state.grid.get((x, y))
+                new_cell = Cell.from_dict(value)
+                # Invalidate the canvas image cache when a player stand-in NPC's
+                # picture changes (cache is keyed by entity id, which is stable)
+                old_occ = old_cell.occupant if old_cell else None
+                new_occ = new_cell.occupant
+                if (old_occ is not None and new_occ is not None
+                        and getattr(old_occ, "id", None) == getattr(new_occ, "id", None)
+                        and getattr(old_occ, "avatar_png", None)
+                        != getattr(new_occ, "avatar_png", None)):
+                    oid = getattr(new_occ, "id", None)
+                    for k in [k for k in self._canvas._img_cache if k[0] == oid]:
+                        del self._canvas._img_cache[k]
+                self.state.grid[(x, y)] = new_cell
             elif op == "del_cell":
                 x, y = map(int, path.split(","))
                 self.state.grid.pop((x, y), None)
@@ -917,8 +933,15 @@ class GameScreen(tk.Frame):
 
         # Title row
         from ui.widgets import hr
+        turn_name = ct.name
+        if ct.combatant_type == "npc":
+            # Player stand-ins are titled by their token name
+            _c = self.state.find_object_cell(ct.id)
+            _occ = self.state.grid[_c].occupant if _c else None
+            if _occ is not None and getattr(_occ, "IsPlayer", False):
+                turn_name = _occ.token_name or turn_name
         title = ("Your Turn" if ct.combatant_type == "player"
-                 else f"{ct.name}'s Turn")
+                 else f"{turn_name}'s Turn")
         title_row = tk.Frame(panel, bg=PALETTE["card2"], pady=3, padx=8)
         title_row.pack(fill=tk.X)
         tk.Label(title_row, text=f"⚔  {title}", bg=PALETTE["card2"],

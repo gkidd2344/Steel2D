@@ -1,7 +1,7 @@
 # Steel2D — Full Technical Requirements
 **Target audience:** Claude Code (automated implementation)  
-**Version:** v0.20.0  
-**Supersedes:** v0.19
+**Version:** v0.21.0  
+**Supersedes:** v0.20.0
 
 > Versioning: `x.y.z` — `x` release, `y` patch, `z` bugfix-of-patch.
 
@@ -584,7 +584,7 @@ When **network play is on**, the gate is bypassed entirely and any source may co
 [⚙]  (gear icon, top-right; opens BanlistDialog)
 
    STEEL2D
-   v0.20.0 · multiplayer tabletop lobby
+   v0.21.0 · multiplayer tabletop lobby
    ─────────────────────────────────────────
    [avatar 40x40]  Signed in as  <alias>
    ─────────────────────────────────────────
@@ -945,16 +945,25 @@ Size is clamped to `[1, 10]`. While `]` or `[` is held, size increments/decremen
 
 ---
 
-### 11.4 Known Performance Limitation
+### 11.4 Rendering Architecture (dirty-flag / tiered render loop)
 
-The renderer uses tkinter's Canvas widget with individual draw calls (rectangle per tile, line per grid line). **Performance degrades proportionally to the total number of filled grid cells:**
+The renderer uses tkinter's Canvas with individual items (rectangle per tile, line per grid line), but does **not** rebuild the scene every frame. The ~60 Hz render tick chooses the cheapest sufficient tier each frame:
 
-- ~50 filled cells: mild frame-rate drop noticeable.
-- ~200+ filled cells: camera panning becomes jittery; tile spawn/delete operations slow noticeably.
+| Tier | When | Cost |
+|---|---|---|
+| **Idle** | Nothing changed | Zero canvas work |
+| **Overlay** | Tooltip moved / chat bubbles animating / drag ghost | Rebuild only `overlay`-tagged items (a handful) |
+| **Pan translate** | Camera panned, nothing else changed | One C-level `canvas.move("static", dx, dy)` call |
+| **Full redraw** | State changed (`mark_dirty()`), zoom/center/resize, pan exhausted the cull margin, or 1 s heartbeat | Delete + recreate the scene |
 
-This is a fundamental constraint of the tkinter Canvas approach; no architecture-level fix is present in v0.20.0.
+Details:
+- All scene items (grid, tiles, highlights, objects, players) are tagged **`static`** via `addtag_all`; tooltip/bubbles/drag-ghost are tagged **`overlay`** and live on top.
+- The scene is drawn with a **4-cell cull margin** beyond the viewport (grid lines included), so smooth DM panning translates existing items and only forces a full redraw after ~3 cells of accumulated pan (~21 frames at default speed).
+- **Dirty signals**: STATE_PATCH application, zoom, `center_on_*`, combat-highlight/move-mode setters, connected-set changes, water-cache invalidation, and window `<Configure>` all call `mark_dirty()`. Multiple patches arriving in one tick **coalesce into a single redraw**.
+- A **1-second heartbeat** full redraw acts as a safety net for any missed dirty signal (bounded staleness, negligible cost).
+- The PC camera lock is recomputed every tick but only triggers a redraw when the offset actually moved.
 
-**Workaround:** middle-mouse drag (with a large brush size) over large regions deletes tiles quickly, reducing the cell count and restoring performance. The performance issue is **content-count-driven** (not content-type-driven — ground tiles without any shading cause the same drop as water tiles).
+Earlier versions rebuilt every item every frame, which collapsed to 1–10 FPS beyond ~75 painted cells; cell count now only affects the (rare) full-redraw tier.
 
 ---
 
@@ -1654,4 +1663,4 @@ All runtime data goes to `%APPDATA%\Steel2D\` (frozen) or project root (dev):
 
 ---
 
-*End of Requirements Document v0.20.0*
+*End of Requirements Document v0.21.0*

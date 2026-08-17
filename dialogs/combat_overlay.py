@@ -45,16 +45,24 @@ class TurnOrderPanel(tk.Frame):
             row = tk.Frame(list_frame, bg=row_bg, pady=3, padx=6)
             row.pack(fill=tk.X)
 
+            name = turn.name or "?"
             if turn.combatant_type == "player":
                 p = self._state.players.get(turn.id)
                 color = p.color if p else "#ffffff"
             else:
                 color = "#cc2222"
+                # DM-spawned player stand-ins use their player colour + token
+                # name so the initiative list reads like the board does.
+                cell = self._state.find_object_cell(turn.id)
+                occ = self._state.grid[cell].occupant if cell else None
+                if occ is not None and getattr(occ, "IsPlayer", False):
+                    color = getattr(occ, "PlayerColor", None) or "#ffffff"
+                    name = occ.token_name or name
 
             tk.Frame(row, bg=color, width=12, height=12).pack(side=tk.LEFT, padx=(0, 4))
 
             marker = "▶ " if is_active else "  "
-            name = (turn.name or "?")[:10]
+            name = name[:10]
             tk.Label(row, text=marker + name, bg=row_bg,
                      fg=PALETTE["fg"], font=FONTS["small"],
                      width=12, anchor="w").pack(side=tk.LEFT)

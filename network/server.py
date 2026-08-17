@@ -2018,46 +2018,30 @@ class GameServer:
             except Exception:
                 pass
 
-        # Reserved hues: NPC red, NPC green, Item orange, door brown,
-        # yell salmon, DM orange, whisper blue/purple, gray/white/black
-        reserved = [
-            0.000,  # red (NPC hostile)
-            0.030,  # salmon/yell
-            0.080,  # orange (DM chat, Item)
-            0.110,  # orange-yellow
-            0.167,  # yellow
-            0.333,  # green (NPC friendly)
-            0.050,  # red-orange (door-ish)
-            0.600,  # cyan-blue area
-            0.650,  # blue (whisper)
-            0.700,  # blue-purple
-            0.750,  # purple
-            0.800,  # purple-magenta
-        ]
-        all_blocked = reserved + used_hues
-        exclusion = 0.10  # wider exclusion radius
+        # Candidate hues come from the shared palette (app.constants), which
+        # already excludes hues reserved for NPCs / items / chat tags. Using the
+        # same source as the DM's manual colour picker keeps both in sync.
+        from app.constants import player_palette_hues, hue_to_player_hex
+        candidates = player_palette_hues()
 
+        # Prefer the candidate furthest from every already-assigned hue.
         best_h = None
         best_dist = -1.0
-        for i in range(72):  # 5-degree steps
-            candidate_h = i / 72
+        for candidate_h in candidates:
             min_dist = min(
-                min(abs(candidate_h - h), 1.0 - abs(candidate_h - h))
-                for h in all_blocked
-            ) if all_blocked else 1.0
-            if min_dist < exclusion:
-                continue
+                (min(abs(candidate_h - h), 1.0 - abs(candidate_h - h))
+                 for h in used_hues),
+                default=1.0,
+            )
             if min_dist > best_dist:
                 best_dist = min_dist
                 best_h = candidate_h
 
         if best_h is None:
-            # Fallback: use deterministic hue from UUID
+            # Palette empty (shouldn't happen) — deterministic hue from UUID
             best_h = (sum(ord(c) for c in player_uuid) % 360) / 360.0
 
-        # Full brightness, high saturation — never dark or washed out
-        r, g, b = colorsys.hsv_to_rgb(best_h, 0.85, 1.0)
-        return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+        return hue_to_player_hex(best_h)
 
     def _bfs_drop_cell(self, origin: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         from collections import deque

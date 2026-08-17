@@ -191,6 +191,12 @@ class SpawnObjectDialog(Panel):
         self._npc_stats = {k: tk.IntVar(value=10) for k in STAT_KEYS}
         self._npc_turns_allowed = tk.IntVar(value=1)
         self._npc_stat_warn = tk.StringVar()
+        # ── Player stand-in state ────────────────────────────────────────────
+        self._npc_is_player = tk.BooleanVar(value=False)
+        self._npc_player_name = tk.StringVar()
+        self._npc_player_color = tk.StringVar(value="")
+        # Preserve an existing avatar across re-renders of the form
+        self._npc_avatar_b64 = getattr(self, "_npc_avatar_b64", None)
 
         # ── General ──────────────────────────────────────────────────────────
         _, gen = self._make_section(self._body_frame, "General", expanded=True)
@@ -236,6 +242,16 @@ class SpawnObjectDialog(Panel):
             self._spinbox(p, self._npc_turns_allowed, 1, 10, w=4).pack(side=tk.LEFT)
         self._field_row(gen, "Turns Allowed", _turns_row)
 
+        def _is_player_row(p):
+            tk.Checkbutton(p, variable=self._npc_is_player,
+                           command=self._on_is_player_toggle,
+                           bg=PALETTE["card"], selectcolor=PALETTE["accent"],
+                           fg="#ffffff", activebackground=PALETTE["card"]).pack(side=tk.LEFT)
+            tk.Label(p, text="renders as a player token",
+                     bg=PALETTE["card"], fg=PALETTE["muted"],
+                     font=FONTS["small"]).pack(side=tk.LEFT, padx=(4, 0))
+        self._field_row(gen, "Is Player", _is_player_row)
+
         # Current HP is intentionally not shown here.
         # Use the right-click "Modify Current HP" option on a spawned NPC.
 
@@ -278,6 +294,11 @@ class SpawnObjectDialog(Panel):
                  bg=PALETTE["card"], fg="#ff8c00", font=FONTS["small"],
                  wraplength=380, justify="left").pack(anchor="w", padx=4, pady=(0, 4))
 
+        # ── Player Details (only present while "Is Player" is checked) ───────
+        self._player_section_outer, self._player_section = self._make_section(
+            self._body_frame, "Player Details", expanded=True)
+        self._build_player_details(self._player_section)
+
         # ── Actions ───────────────────────────────────────────────────────────
         self._action_show_scales_with = True   # NPC actions carry ScalesWith
         _, act_sec = self._make_section(self._body_frame, "Actions", expanded=False)
@@ -287,6 +308,165 @@ class SpawnObjectDialog(Panel):
 
         self._recalc_npc_hp()
         self._validate_npc_stats()
+        self._on_is_player_toggle()   # show/hide Player Details to match state
+
+    # ── Player stand-in details ───────────────────────────────────────────────
+
+    def _on_is_player_toggle(self) -> None:
+        """Show the Player Details section only when Is Player is checked."""
+        outer = getattr(self, "_player_section_outer", None)
+        if outer is None:
+            return
+        if self._npc_is_player.get():
+            # Re-pack in its original slot (before the Actions section)
+            outer.pack(fill=tk.X, pady=(4, 0))
+            actions = getattr(self, "_action_frame", None)
+            if actions is not None:
+                try:
+                    outer.pack_configure(before=actions.master.master)
+                except Exception:
+                    pass
+        else:
+            outer.pack_forget()
+        self._update_scroll()
+
+    def _build_player_details(self, parent: tk.Frame) -> None:
+        from app.constants import player_palette
+
+        # Name — token label (falls back to the NPC name when blank)
+        def _name_row(p):
+            styled_entry(p, textvariable=self._npc_player_name,
+                         width=22).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._field_row(parent, "Name", _name_row)
+        tk.Label(parent, text="Leave blank to use the NPC's name.",
+                 bg=PALETTE["card"], fg=PALETTE["muted"],
+                 font=FONTS["small"]).pack(anchor="w", padx=4)
+
+        # Colour — swatch grid drawn from the shared player palette
+        tk.Label(parent, text="Color", bg=PALETTE["card"], fg="#ffffff",
+                 font=FONTS["form_label"]).pack(anchor="w", padx=4, pady=(8, 2))
+        palette = player_palette()
+        if not self._npc_player_color.get():
+            self._npc_player_color.set(palette[0] if palette else "#ffffff")
+
+        swatch_wrap = tk.Frame(parent, bg=PALETTE["card"])
+        swatch_wrap.pack(anchor="w", padx=4)
+        self._swatch_widgets: dict = {}
+        PER_ROW = 10
+        for i, hexcol in enumerate(palette):
+            sw = tk.Frame(swatch_wrap, bg=hexcol, width=24, height=24,
+                          cursor="hand2", highlightthickness=2,
+                          highlightbackground=PALETTE["card"])
+            sw.grid(row=i // PER_ROW, column=i % PER_ROW, padx=2, pady=2)
+            sw.grid_propagate(False)
+            sw.bind("<Button-1>",
+                    lambda e, c=hexcol: self._select_player_color(c))
+            self._swatch_widgets[hexcol] = sw
+
+        preview_row = tk.Frame(parent, bg=PALETTE["card"])
+        preview_row.pack(anchor="w", padx=4, pady=(6, 0))
+        tk.Label(preview_row, text="Selected:", bg=PALETTE["card"],
+                 fg=PALETTE["muted"], font=FONTS["small"]).pack(side=tk.LEFT)
+        self._color_preview = tk.Frame(preview_row, width=28, height=16,
+                                       bg=self._npc_player_color.get(),
+                                       highlightthickness=1,
+                                       highlightbackground=PALETTE["border"])
+        self._color_preview.pack(side=tk.LEFT, padx=6)
+        self._color_preview.pack_propagate(False)
+        tk.Label(preview_row, textvariable=self._npc_player_color,
+                 bg=PALETTE["card"], fg=PALETTE["fg_dim"],
+                 font=FONTS["small"]).pack(side=tk.LEFT)
+
+        # Picture — upload / remove with a live preview
+        tk.Label(parent, text="Picture", bg=PALETTE["card"], fg="#ffffff",
+                 font=FONTS["form_label"]).pack(anchor="w", padx=4, pady=(10, 2))
+        pic_row = tk.Frame(parent, bg=PALETTE["card"])
+        pic_row.pack(anchor="w", padx=4, pady=(0, 4))
+        self._npc_pic_canvas = tk.Canvas(
+            pic_row, width=64, height=64, bg=PALETTE["card2"],
+            highlightthickness=1, highlightbackground=PALETTE["border"])
+        self._npc_pic_canvas.pack(side=tk.LEFT, padx=(0, 10))
+        pic_btns = tk.Frame(pic_row, bg=PALETTE["card"])
+        pic_btns.pack(side=tk.LEFT, anchor="n")
+        flat_btn(pic_btns, "Upload Picture", self._upload_npc_picture,
+                 style="ghost").pack(fill=tk.X, pady=(0, 4))
+        flat_btn(pic_btns, "Remove Picture", self._remove_npc_picture,
+                 style="muted").pack(fill=tk.X)
+
+        self._select_player_color(self._npc_player_color.get())
+        self._load_npc_picture_preview()
+
+    def _select_player_color(self, hexcol: str) -> None:
+        self._npc_player_color.set(hexcol)
+        for c, sw in getattr(self, "_swatch_widgets", {}).items():
+            sw.config(highlightbackground=("#ffffff" if c == hexcol
+                                           else PALETTE["card"]))
+        if hasattr(self, "_color_preview"):
+            try:
+                self._color_preview.config(bg=hexcol)
+            except Exception:
+                pass
+
+    def _upload_npc_picture(self) -> None:
+        from tkinter import filedialog, messagebox
+        try:
+            from PIL import Image
+        except ImportError:
+            messagebox.showerror("Missing Library",
+                                 "Pillow is required for picture upload.")
+            return
+        path = filedialog.askopenfilename(
+            title="Select Player Picture",
+            filetypes=[("Image files",
+                        "*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp")])
+        if not path:
+            return
+        try:
+            import io, base64
+            img = Image.open(path)
+            w, h = img.size
+            s = min(w, h)
+            scale = 128 / s
+            nw, nh = int(w * scale), int(h * scale)
+            img = img.resize((nw, nh), Image.LANCZOS)
+            if nw > 128:
+                left = (nw - 128) // 2
+                img = img.crop((left, 0, left + 128, 128))
+            elif nh > 128:
+                top = (nh - 128) // 2
+                img = img.crop((0, top, 128, top + 128))
+            img = img.convert("RGBA")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            self._npc_avatar_b64 = base64.b64encode(buf.getvalue()).decode()
+            self._load_npc_picture_preview()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _remove_npc_picture(self) -> None:
+        self._npc_avatar_b64 = None
+        self._load_npc_picture_preview()
+
+    def _load_npc_picture_preview(self) -> None:
+        cv = getattr(self, "_npc_pic_canvas", None)
+        if cv is None:
+            return
+        cv.delete("all")
+        b64 = getattr(self, "_npc_avatar_b64", None)
+        if not b64:
+            cv.create_text(32, 32, text="No\nImage", fill=PALETTE["muted"],
+                           font=FONTS["small"], justify="center")
+            return
+        try:
+            import io, base64
+            from PIL import Image, ImageTk
+            data = base64.b64decode(b64)
+            img = Image.open(io.BytesIO(data)).resize((64, 64), Image.LANCZOS)
+            self._npc_pic_ref = ImageTk.PhotoImage(img)   # keep a reference
+            cv.create_image(0, 0, anchor="nw", image=self._npc_pic_ref)
+        except Exception:
+            cv.create_text(32, 32, text="Error", fill=PALETTE["danger"],
+                           font=FONTS["small"])
 
     def _recalc_npc_hp(self) -> None:
         if not hasattr(self, "_npc_level"):
@@ -722,6 +902,21 @@ class SpawnObjectDialog(Panel):
             self._npc_hostile.set(obj.Hostile)
             self._npc_curhp.set(obj.CurrentHP)   # preserved for result dict
             self._npc_turns_allowed.set(max(1, getattr(obj, "TurnsAllowed", 1)))
+            # ── Player stand-in fields ───────────────────────────────────────
+            self._npc_is_player.set(bool(getattr(obj, "IsPlayer", False)))
+            self._npc_player_name.set(getattr(obj, "PlayerName", "") or "")
+            existing_color = getattr(obj, "PlayerColor", "") or ""
+            avatar = getattr(obj, "avatar_png", None)
+            if avatar:
+                try:
+                    import base64 as _b64
+                    self._npc_avatar_b64 = _b64.b64encode(avatar).decode()
+                except Exception:
+                    self._npc_avatar_b64 = None
+            self._load_npc_picture_preview()
+            if existing_color and existing_color != "#ffffff":
+                self._select_player_color(existing_color)
+            self._on_is_player_toggle()
             if obj.Actions:
                 self._fill_actions(obj.Actions)
             # Recalculate after all values are set so MaxHP display is correct
@@ -834,6 +1029,11 @@ class SpawnObjectDialog(Panel):
                 "Stats":        {k: v.get() for k, v in self._npc_stats.items()},
                 "Actions":      self._collect_actions(),
                 "TurnsAllowed": max(1, self._npc_turns_allowed.get()),
+                # Player stand-in (only meaningful when IsPlayer is set)
+                "IsPlayer":     self._npc_is_player.get(),
+                "PlayerName":   self._npc_player_name.get().strip(),
+                "PlayerColor":  self._npc_player_color.get() or "#ffffff",
+                "avatar_png":   getattr(self, "_npc_avatar_b64", None),
             }
         else:   # Item
             name = self._item_name.get().strip()

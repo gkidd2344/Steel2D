@@ -65,6 +65,18 @@ class GameCanvas(tk.Canvas):
         self._img_cache: Dict[Tuple, object] = {}
         self._anim_frame = 0
 
+        # ── Dirty-flag rendering state ─────────────────────────────────────────
+        # Full scene redraws happen only when something changed (or on a slow
+        # heartbeat as a safety net); camera pans translate existing items at
+        # C speed; tooltip/bubbles/drag-ghost live on a cheap overlay layer.
+        self._dirty: bool = True            # full static redraw required
+        self._overlay_dirty: bool = True    # overlay (tooltip/bubbles/ghost) redraw
+        self._pan_pending_x: float = 0.0    # pan px not yet applied to items
+        self._pan_pending_y: float = 0.0
+        self._pan_since_full_x: float = 0.0 # pan px translated since last full draw
+        self._pan_since_full_y: float = 0.0
+        self._last_full_draw: float = 0.0
+
         # ── Water depth colours (precomputed from base) ───────────────────────
         # Four variants: depth 0 (shallow) → 3 (deep).
         # Each deeper level: brightness −12.5 %, saturation +12.5 %.
@@ -98,13 +110,22 @@ class GameCanvas(tk.Canvas):
         self.bind("<B2-Motion>",       self._on_middle_drag)
         self.bind("<ButtonRelease-2>", self._on_middle_release)
         self.bind("<MouseWheel>",      self._on_scroll)
+        self.bind("<Configure>",       lambda e: self.mark_dirty())
 
         self._redraw()
 
     # ── public API ────────────────────────────────────────────────────────────
 
+    def mark_dirty(self) -> None:
+        """Request a full static-scene redraw on the next render tick."""
+        self._dirty = True
+
+    def mark_overlay_dirty(self) -> None:
+        """Request an overlay (tooltip/bubbles/ghost) redraw on the next tick."""
+        self._overlay_dirty = True
+
     def refresh(self) -> None:
-        pass
+        self.mark_dirty()
 
     def center_on_cell(self, x: int, y: int) -> None:
         w = self.winfo_width() or 800
@@ -114,12 +135,14 @@ class GameCanvas(tk.Canvas):
         cy = y * BASE_CELL_PX + BASE_CELL_PX / 2
         self.offset_x = cx - w / (2 * self.zoom)
         self.offset_y = cy - h / (2 * self.zoom)
+        self.mark_dirty()
 
     def add_bubble(self, msg: dict) -> None:
         sender = msg.get("sender_uuid", "")
         text   = msg.get("content", "")[:60]
         color  = _tag_color(msg.get("msg_type", "normal"))
 
+        self._overlay_dirty = True
         if sender.startswith("NPC:"):
             # NPC impersonation — track by npc_id so bubble follows the NPC
             self.bubbles.append({
@@ -148,56 +171,141 @@ class GameCanvas(tk.Canvas):
     def set_combat_action(self, action_dict: Optional[dict], targets: set) -> None:
         self._combat_action = action_dict
         self._valid_targets = targets
+        self.mark_dirty()   # highlights live in the static layer
 
     def set_combat_move_mode(self, enabled: bool) -> None:
         self._combat_move_mode = enabled
+        self.mark_dirty()
 
     def set_combat_valid_moves(self, cells: set) -> None:
         self._combat_valid_moves = set(cells)
+        self.mark_dirty()
 
     def pan(self, dx: float, dy: float) -> None:
+        """Move the camera. Translation is applied to existing canvas items at
+        C speed on the next tick — no full redraw until the accumulated pan
+        exhausts the extra cull margin drawn beyond the viewport."""
         self.offset_x += dx
         self.offset_y += dy
+        self._pan_pending_x += dx * self.zoom
+        self._pan_pending_y += dy * self.zoom
 
     # ── render loop ───────────────────────────────────────────────────────────
+    #
+    # Three-tier rendering. The tick still runs at ~60 Hz, but each tick does
+    # only the minimum work required:
+    #   1. FULL   — delete + recreate the whole scene. Only when state changed
+    #               (dirty flag), the camera jumped/zoomed/resized, accumulated
+    #               pan exhausted the cull margin, or on a slow heartbeat.
+    #   2. PAN    — camera panned but nothing else changed: translate all
+    #               static items with one C-level canvas.move() call.
+    #   3. OVERLAY— tooltip / chat bubbles / drag ghost changed: delete and
+    #               recreate only the "overlay"-tagged items (a handful).
+    #   4. IDLE   — nothing changed: no canvas work at all.
+    #
+    # This makes idle cost O(0) and pan cost O(1 Tcl call) instead of a full
+    # O(n-cells) Python rebuild 60×/second — the source of the FPS collapse
+    # beyond ~75 painted cells.
+
+    _CULL_MARGIN = 4      # cells rendered beyond the viewport (pan headroom)
+    _HEARTBEAT_S = 1.0    # max staleness for any missed dirty signal
 
     def _redraw(self) -> None:
         try:
-            self.delete("all")
-            self._anim_frame = (self._anim_frame + 1) % 60
             now = time.time()
-            self.bubbles = [b for b in self.bubbles if now - b["born_at"] < 3.0]
+
+            # Expired bubbles are pruned here; any live bubble animates (fade +
+            # follows its entity), so keep the overlay refreshing while present.
+            if self.bubbles:
+                self.bubbles = [b for b in self.bubbles
+                                if now - b["born_at"] < 3.0]
+                self._overlay_dirty = True
+
+            # Drag ghost follows the cursor while an object drag is active
+            if self._drag_obj:
+                self._overlay_dirty = True
 
             w = self.winfo_width() or 800
             h = self.winfo_height() or 600
             cell_px = BASE_CELL_PX * self.zoom
 
-            # PC: camera always locked to the player — no free pan or zoom
+            # PC: camera always locked to the player. Recompute each tick, but
+            # only trigger a redraw when it actually moved.
             if not self.is_dm:
                 pc = self._player_cell()
                 if pc:
-                    self.offset_x = (pc[0] * BASE_CELL_PX + BASE_CELL_PX / 2
-                                     - w / (2 * self.zoom))
-                    self.offset_y = (pc[1] * BASE_CELL_PX + BASE_CELL_PX / 2
-                                     - h / (2 * self.zoom))
+                    ox = (pc[0] * BASE_CELL_PX + BASE_CELL_PX / 2
+                          - w / (2 * self.zoom))
+                    oy = (pc[1] * BASE_CELL_PX + BASE_CELL_PX / 2
+                          - h / (2 * self.zoom))
+                    if (abs(ox - self.offset_x) > 0.01
+                            or abs(oy - self.offset_y) > 0.01):
+                        self.offset_x = ox
+                        self.offset_y = oy
+                        self._dirty = True
 
-            min_cx = int(self.offset_x / BASE_CELL_PX) - 1
-            max_cx = int((self.offset_x + w / self.zoom) / BASE_CELL_PX) + 2
-            min_cy = int(self.offset_y / BASE_CELL_PX) - 1
-            max_cy = int((self.offset_y + h / self.zoom) / BASE_CELL_PX) + 2
+            # Accumulated pan beyond the safe margin → full redraw needed
+            margin_px = self._CULL_MARGIN * cell_px
+            total_pan_x = self._pan_since_full_x + self._pan_pending_x
+            total_pan_y = self._pan_since_full_y + self._pan_pending_y
+            if (abs(total_pan_x) > margin_px - cell_px
+                    or abs(total_pan_y) > margin_px - cell_px):
+                self._dirty = True
 
-            self._draw_grid(w, h, cell_px)
-            self._draw_tiles(min_cx, max_cx, min_cy, max_cy, cell_px)
-            self._draw_combat_highlights(cell_px)
-            self._draw_objects(min_cx, max_cx, min_cy, max_cy, cell_px)
-            self._draw_players(cell_px)
-            self._draw_bubbles(cell_px)
-            self._draw_drag_ghost(cell_px)
-            self._draw_tooltip(cell_px)
+            if self._dirty or (now - self._last_full_draw) >= self._HEARTBEAT_S:
+                self._full_redraw(w, h, cell_px, now)
+            else:
+                pdx, pdy = self._pan_pending_x, self._pan_pending_y
+                if pdx or pdy:
+                    # One C-level translate of every static item
+                    self.move("static", -pdx, -pdy)
+                    self._pan_since_full_x += pdx
+                    self._pan_since_full_y += pdy
+                    self._pan_pending_x = 0.0
+                    self._pan_pending_y = 0.0
+                    # Bubbles/tooltip are anchored to world cells — refresh them
+                    self._overlay_dirty = True
+                if self._overlay_dirty:
+                    self.delete("overlay")
+                    self._draw_overlays(cell_px, now)
+                    self._overlay_dirty = False
         except Exception:
             pass
         finally:
             self.after(16, self._redraw)
+
+    def _full_redraw(self, w: int, h: int, cell_px: float, now: float) -> None:
+        """Rebuild the entire scene. Static items are tagged 'static' so pans
+        can translate them; overlays are drawn last (tagged 'overlay')."""
+        self.delete("all")
+        self._dirty = False
+        self._pan_pending_x = self._pan_pending_y = 0.0
+        self._pan_since_full_x = self._pan_since_full_y = 0.0
+        self._last_full_draw = now
+
+        m = self._CULL_MARGIN
+        min_cx = int(self.offset_x / BASE_CELL_PX) - m - 1
+        max_cx = int((self.offset_x + w / self.zoom) / BASE_CELL_PX) + m + 1
+        min_cy = int(self.offset_y / BASE_CELL_PX) - m - 1
+        max_cy = int((self.offset_y + h / self.zoom) / BASE_CELL_PX) + m + 1
+
+        self._draw_grid(w, h, cell_px, margin_px=m * cell_px)
+        self._draw_tiles(min_cx, max_cx, min_cy, max_cy, cell_px)
+        self._draw_combat_highlights(cell_px)
+        self._draw_objects(min_cx, max_cx, min_cy, max_cy, cell_px)
+        self._draw_players(cell_px)
+        # Everything drawn so far belongs to the translatable static layer
+        self.addtag_all("static")
+
+        self._draw_overlays(cell_px, now)
+        self._overlay_dirty = False
+
+    def _draw_overlays(self, cell_px: float, now: float) -> None:
+        """Draw the cheap per-frame layer: bubbles, drag ghost, hover tooltip.
+        Every item created here must carry the 'overlay' tag."""
+        self._draw_bubbles(cell_px)
+        self._draw_drag_ghost(cell_px)
+        self._draw_tooltip(cell_px)
 
     def _world_to_canvas(self, wx: float, wy: float) -> Tuple[float, float]:
         return (wx - self.offset_x) * self.zoom, (wy - self.offset_y) * self.zoom
@@ -213,15 +321,21 @@ class GameCanvas(tk.Canvas):
         cx, cy = self._world_to_canvas(wx, wy)
         return cx, cy, cx + cell_px, cy + cell_px
 
-    def _draw_grid(self, w: int, h: int, cell_px: float) -> None:
+    def _draw_grid(self, w: int, h: int, cell_px: float,
+                   margin_px: float = 0.0) -> None:
+        """Grid lines across the viewport plus `margin_px` overhang on every
+        side, so pan translation doesn't reveal a lineless border."""
         color = PALETTE["grid"]
-        x = -self.offset_x * self.zoom % cell_px
-        while x < w:
-            self.create_line(x, 0, x, h, fill=color, width=1)
+        n_extra = int(margin_px // cell_px) + 1 if margin_px else 0
+        x = (-self.offset_x * self.zoom % cell_px) - n_extra * cell_px
+        while x < w + margin_px:
+            self.create_line(x, -margin_px, x, h + margin_px,
+                             fill=color, width=1)
             x += cell_px
-        y = -self.offset_y * self.zoom % cell_px
-        while y < h:
-            self.create_line(0, y, w, y, fill=color, width=1)
+        y = (-self.offset_y * self.zoom % cell_px) - n_extra * cell_px
+        while y < h + margin_px:
+            self.create_line(-margin_px, y, w + margin_px, y,
+                             fill=color, width=1)
             y += cell_px
 
     _GROUND_COLOR = "#ffffff"
@@ -354,6 +468,20 @@ class GameCanvas(tk.Canvas):
                 self._draw_stairs(obj, x0, y0, x1, y1, cx, cy)
 
     def _draw_npc(self, npc: NPC, x0, y0, x1, y1, cx, cy, pad) -> None:
+        # DM-spawned player stand-in: draw the player token instead of the
+        # hostile/friendly NPC glyph so it reads as a player on the board.
+        if getattr(npc, "IsPlayer", False):
+            cell_px = x1 - x0
+            self._draw_player_token(
+                x0, y0, x1, y1, cell_px,
+                color=getattr(npc, "PlayerColor", None) or "#ffffff",
+                name=npc.token_name,
+                entity=npc,
+                has_image=bool(getattr(npc, "avatar_png", None)) and HAS_PIL,
+            )
+            self._draw_hp_bar(npc, x0, y0, x1)
+            return
+
         size = min(x1 - x0, y1 - y0) * 0.595
         # Icon floats from the bottom of the tile.
         # Tile has 2*zoom inward pad; leave an additional 4*zoom gap above tile edge.
@@ -484,7 +612,7 @@ class GameCanvas(tk.Canvas):
                                       outline=border_color,
                                       width=2)
                 if has_image:
-                    self._draw_avatar(player, x0, icon_top, x1, icon_bottom, cell_px)
+                    self._draw_entity_avatar(player, x0, icon_top, x1, icon_bottom, cell_px)
                 else:
                     abbrev = (player.Name or "?")[:2].upper()
                     self.create_text((x0 + x1) / 2, (icon_top + icon_bottom) / 2,
@@ -492,13 +620,37 @@ class GameCanvas(tk.Canvas):
                                      font=("Segoe UI", max(8, int(cell_px * 0.22)), "bold"))
                 self._draw_hp_bar(player, x0, y0, x1)
 
-    def _draw_avatar(self, player: PlayerObject, x0, y0, x1, y1, cell_px) -> None:
+    def _draw_player_token(self, x0, y0, x1, y1, cell_px: float,
+                           color: str, name: str, entity,
+                           has_image: bool) -> None:
+        """Draw the square player-style token (shared by real players and
+        DM-spawned player stand-in NPCs)."""
+        h_pad = cell_px * 0.175
+        icon_bottom = y1 - 2 * self.zoom - 4 * self.zoom
+        icon_h = cell_px * 0.65
+        icon_top = icon_bottom - icon_h
+
+        # Border: token colour when an image is shown; black otherwise
+        border_color = color if has_image else "#000000"
+        self.create_rectangle(x0 + h_pad, icon_top, x1 - h_pad, icon_bottom,
+                              fill=color, outline=border_color, width=2)
+        if has_image:
+            self._draw_entity_avatar(entity, x0, icon_top, x1, icon_bottom, cell_px)
+        else:
+            abbrev = (name or "?")[:2].upper()
+            self.create_text((x0 + x1) / 2, (icon_top + icon_bottom) / 2,
+                             text=abbrev, fill="#ffffff",
+                             font=("Segoe UI", max(8, int(cell_px * 0.22)), "bold"))
+
+    def _draw_entity_avatar(self, entity, x0, y0, x1, y1, cell_px) -> None:
+        """Draw `entity.avatar_png` scaled into the token box. Works for any
+        entity exposing `.id` and `.avatar_png` (PlayerObject or player NPC)."""
         size = int(cell_px * 0.75)
-        key = (player.id, size)
+        key = (entity.id, size)
         if key not in self._img_cache:
             try:
                 import io
-                img = Image.open(io.BytesIO(player.avatar_png))
+                img = Image.open(io.BytesIO(entity.avatar_png))
                 img = img.resize((size, size), Image.LANCZOS)
                 self._img_cache[key] = ImageTk.PhotoImage(img)
             except Exception:
@@ -551,9 +703,11 @@ class GameCanvas(tk.Canvas):
 
             self.create_rectangle(cx - bub_w / 2, bub_y,
                                   cx + bub_w / 2, bub_y + bub_h,
-                                  fill="#111", outline=PALETTE["border"])
+                                  fill="#111", outline=PALETTE["border"],
+                                  tags="overlay")
             self.create_text(cx, bub_y + bub_h / 2, text=text,
-                             fill=color, font=("Segoe UI", font_size))
+                             fill=color, font=("Segoe UI", font_size),
+                             tags="overlay")
 
     def _draw_drag_ghost(self, cell_px: float) -> None:
         if not self._drag_obj or not self._drag_mouse:
@@ -562,7 +716,7 @@ class GameCanvas(tk.Canvas):
         s = cell_px * 0.5
         self.create_rectangle(mx - s, my - s, mx + s, my + s,
                               fill=PALETTE["accent"], outline="#ffffff",
-                              stipple="gray50", width=1)
+                              stipple="gray50", width=1, tags="overlay")
 
     def _draw_tooltip(self, cell_px: float) -> None:
         if not self._hover_cell:
@@ -595,11 +749,15 @@ class GameCanvas(tk.Canvas):
                 can_see = has_los(self.state, pc, (gx, gy),
                                   self.state.settings.los_max_distance)
             if isinstance(obj, NPC):
+                is_player_npc = getattr(obj, "IsPlayer", False)
                 if can_see:
                     if self.is_dm:
                         status = "Hostile" if obj.Hostile else "Friendly"
+                        # Player stand-ins show their token name and are
+                        # flagged so the DM can tell them from real players.
+                        lines.append(f"{obj.token_name}  (player stand-in)"
+                                     if is_player_npc else obj.Name)
                         lines += [
-                            obj.Name,
                             f"Health: {obj.CurrentHP}/{obj.MaximumHP}",
                             f"Size: {obj.Size}",
                             f"Status: {status}",
@@ -607,7 +765,8 @@ class GameCanvas(tk.Canvas):
                         ]
                         npc_included_location = True
                     else:
-                        lines.append(obj.Name)
+                        # Players see a stand-in exactly like another player
+                        lines.append(obj.token_name if is_player_npc else obj.Name)
                         if obj.Description:
                             lines.append(obj.Description)
             elif isinstance(obj, Item):
@@ -658,7 +817,7 @@ class GameCanvas(tk.Canvas):
         # measured, then place the background rectangle behind it.
         text_item = self.create_text(
             0, 0, text=text, fill=PALETTE["fg"],
-            font=("Segoe UI", 8), anchor="nw", width=wrap_w)
+            font=("Segoe UI", 8), anchor="nw", width=wrap_w, tags="overlay")
         bbox = self.bbox(text_item)
         if not bbox:
             return
@@ -670,7 +829,8 @@ class GameCanvas(tk.Canvas):
         ty = max(0, min(my + 15, self.winfo_height() - th - 5))
         self.coords(text_item, tx + pad, ty + pad)
         rect = self.create_rectangle(tx, ty, tx + tw, ty + th,
-                                     fill="#111111", outline=PALETTE["border"])
+                                     fill="#111111", outline=PALETTE["border"],
+                                     tags="overlay")
         self.tag_lower(rect, text_item)
 
     # ── input handlers ────────────────────────────────────────────────────────
@@ -679,6 +839,8 @@ class GameCanvas(tk.Canvas):
         self._hover_cell = self._canvas_to_cell(event.x, event.y)
         if self._drag_obj:
             self._drag_mouse = (event.x, event.y)
+        # Tooltip is anchored to the pointer — refresh the overlay layer
+        self._overlay_dirty = True
 
     # ── left mouse (click + paint + object drag) ──────────────────────────────
 
@@ -811,6 +973,7 @@ class GameCanvas(tk.Canvas):
     def _on_drag_end(self, event) -> None:
         self._painting = False
         self._painted_cells = set()
+        self._overlay_dirty = True   # clear the drag ghost
         if not self._drag_obj or not self._drag_source:
             self._drag_obj = None
             self._drag_source = None
@@ -887,6 +1050,7 @@ class GameCanvas(tk.Canvas):
         self.zoom = new_zoom
         self.offset_x = wx - mx / new_zoom
         self.offset_y = wy - my / new_zoom
+        self.mark_dirty()   # zoom changes item sizes — full redraw required
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -894,6 +1058,7 @@ class GameCanvas(tk.Canvas):
         """Force-clear the full water depth cache."""
         self._water_depth_cache = {}
         self._water_cache_key = 0
+        self.mark_dirty()
 
     def mark_tile_dirty(self) -> None:
         """No-op in the non-PIL renderer (kept for API compatibility)."""
@@ -967,6 +1132,7 @@ class GameCanvas(tk.Canvas):
         world_cy = 2 * BASE_CELL_PX
         self.offset_x = world_cx - w / (2 * self.zoom)
         self.offset_y = world_cy - h / (2 * self.zoom)
+        self.mark_dirty()
 
     def _player_cell(self) -> Optional[Tuple[int, int]]:
         for key, uuids in self.state.players_at.items():

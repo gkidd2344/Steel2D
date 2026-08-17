@@ -68,3 +68,54 @@ THROWABLE_SLOT = 9
 
 RESERVED_HUES = [0.0, 0.167, 0.333, 0.083, 0.05]
 HUE_EXCLUSION_RADIUS = 0.08
+
+# ── Player colour palette ─────────────────────────────────────────────────────
+# Hues reserved for game elements that must stay visually distinct from players:
+# NPC red/green, Item + DM orange, yell salmon, whisper blue/purple, etc.
+PLAYER_RESERVED_HUES = [
+    0.000,  # red (NPC hostile)
+    0.030,  # salmon / yell
+    0.050,  # red-orange (door-ish)
+    0.080,  # orange (DM chat, Item)
+    0.110,  # orange-yellow
+    0.167,  # yellow
+    0.333,  # green (NPC friendly)
+    0.600,  # cyan-blue area
+    0.650,  # blue (whisper)
+    0.700,  # blue-purple
+    0.750,  # purple
+    0.800,  # purple-magenta
+]
+PLAYER_HUE_EXCLUSION = 0.06   # minimum hue distance from any reserved hue
+PLAYER_COLOR_SAT = 0.85       # always high saturation — never washed out
+PLAYER_COLOR_VAL = 1.0        # always full brightness — never dark
+_PLAYER_HUE_STEPS = 72        # 5-degree steps around the wheel
+
+
+def hue_to_player_hex(h: float) -> str:
+    """Convert a hue to the canonical player colour at that hue."""
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h, PLAYER_COLOR_SAT, PLAYER_COLOR_VAL)
+    return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
+
+def player_palette_hues(exclusion: float = None) -> list:
+    """Hues eligible for player colours, in wheel order.
+
+    Single source of truth shared by the server's random colour assignment and
+    the DM's manual colour picker, so both offer exactly the same options.
+    """
+    excl = PLAYER_HUE_EXCLUSION if exclusion is None else exclusion
+    out = []
+    for i in range(_PLAYER_HUE_STEPS):
+        h = i / _PLAYER_HUE_STEPS
+        if any(min(abs(h - r), 1.0 - abs(h - r)) < excl
+               for r in PLAYER_RESERVED_HUES):
+            continue
+        out.append(h)
+    return out
+
+
+def player_palette(exclusion: float = None) -> list:
+    """Hex colours eligible for players (same set the server randomises from)."""
+    return [hue_to_player_hex(h) for h in player_palette_hues(exclusion)]
