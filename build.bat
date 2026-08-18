@@ -53,6 +53,7 @@ echo.
 set VENV_PY=.venv\Scripts\python.exe
 
 echo [0/5] Pulling any changes from GitHub before build...
+git stash
 git pull
 echo.
 
